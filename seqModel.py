@@ -164,19 +164,19 @@ if __name__ == '__main__':
     config = {
         'seed': 42,
         'seqLength': 10,
-        'batchSize': 64,
+        'batchSize': 32,
         'nEpochs': 20,
         'learningRate': 0.001,
         'dModel': 64,
         'nHead': 4,
         'numLayers': 2,
         'dropout': 0.1,
-        'savePath': 'bestTransformerModel.ckpt',
+        'saveDir': 'savedModels', # Changed from savePath to saveDir
         'datasetPath': 'dataset/games.csv',
         # 定義賽季切分
-        'trainSeasons': [22019, 22020, 22021],
-        'valSeasons': [22022], 
-        'testSeasons': [22023] 
+        'trainSeasons': [22019, 22020, 22021, 22022],
+        'valSeasons': [22023], 
+        'testSeasons': [] # We will use live 2024-25 data for true testing in the notebook 
     }
 
     # 1. 初始化
@@ -216,25 +216,35 @@ if __name__ == '__main__':
         if len(xTrain) == 0:
             raise ValueError("No training data generated! Check Season IDs.")
 
-        # 標準化
+        # 標準化 (Features)
         scalerX = StandardScaler()
         
-        # Fit on Train
+        # Fit on Train Features
         xTrainReshaped = xTrain.reshape(-1, len(featureCols))
         xTrainScaled = scalerX.fit_transform(xTrainReshaped).reshape(xTrain.shape)
         
-        # Transform Valid
+        # Transform Valid Features
         xValReshaped = xVal.reshape(-1, len(featureCols))
         xValScaled = scalerX.transform(xValReshaped).reshape(xVal.shape)
         
-        # Transform Test
+        # Transform Test Features
         xTestReshaped = xTest.reshape(-1, len(featureCols))
         xTestScaled = scalerX.transform(xTestReshaped).reshape(xTest.shape)
 
+        # 標準化 (Targets)
+        scalerY = StandardScaler()
+        
+        # Fit on Train Targets
+        yTrainScaled = scalerY.fit_transform(yTrain)
+        
+        # Transform Valid & Test Targets
+        yValScaled = scalerY.transform(yVal)
+        yTestScaled = scalerY.transform(yTest)
+
         # DataLoader
-        trainDataset = NbaSequenceDataset(xTrainScaled, yTrain)
-        valDataset = NbaSequenceDataset(xValScaled, yVal)
-        testDataset = NbaSequenceDataset(xTestScaled, yTest)
+        trainDataset = NbaSequenceDataset(xTrainScaled, yTrainScaled)
+        valDataset = NbaSequenceDataset(xValScaled, yValScaled)
+        testDataset = NbaSequenceDataset(xTestScaled, yTestScaled)
         
         # num_workers=0 avoids Windows multiprocessing issues
         trainLoader = DataLoader(trainDataset, batch_size=config['batchSize'], shuffle=True, drop_last=True, num_workers=0)
@@ -256,6 +266,12 @@ if __name__ == '__main__':
 
         # 4. 訓練迴圈
         bestLoss = float('inf')
+        bestModelPath = "" # Store the path of the best model
+        
+        # Ensure save directory exists
+        if not os.path.exists(config['saveDir']):
+            os.makedirs(config['saveDir'])
+            
         print("Step 3: Start Training...")
 
         for epoch in range(config['nEpochs']):
@@ -263,7 +279,7 @@ if __name__ == '__main__':
             model.train()
             trainLossList = []
             
-            # 使用 tqdm 顯示進度 (在 console 中比較乾淨)
+            # 使用 tqdm 顯示進度
             trainPbar = tqdm(trainLoader, desc=f"Epoch {epoch+1}/{config['nEpochs']}", leave=False)
             
             for x, y in trainPbar:
@@ -278,7 +294,6 @@ if __name__ == '__main__':
                 
                 optimizer.step()
                 trainLossList.append(loss.item())
-                # trainPbar.set_postfix({'loss': loss.item()}) # 選項：顯示即時 loss
 
             trainMeanLoss = sum(trainLossList) / len(trainLossList)
 
@@ -300,28 +315,47 @@ if __name__ == '__main__':
             # 儲存最佳模型
             if valMeanLoss < bestLoss:
                 bestLoss = valMeanLoss
-                torch.save(model.state_dict(), config['savePath'])
-                print(f"  >>> New Best Model Saved (Loss: {bestLoss:.4f})")
+                
+                # Delete previous best model if it exists
+                if bestModelPath and os.path.exists(bestModelPath):
+                    try:
+                        os.remove(bestModelPath)
+                        print(f"  >>> Removed previous best model: {bestModelPath}")
+                    except OSError as e:
+                        print(f"  >>> Error removing previous model: {e}")
+
+                # Dynamic Filename
+                modelFilename = f"best_model_ep{epoch+1}_loss{bestLoss:.4f}_seq{config['seqLength']}_d{config['dModel']}_head{config['nHead']}.ckpt"
+                savePath = os.path.join(config['saveDir'], modelFilename)
+                
+                torch.save(model.state_dict(), savePath)
+                bestModelPath = savePath # Update best model path
+                print(f"  >>> New Best Model Saved: {savePath}")
         
         # --- Testing Phase ---
         print("\nStep 4: Start Testing with Best Model...")
-        # Load best model
-        model.load_state_dict(torch.load(config['savePath']))
-        model.eval()
         
-        testLossList = []
-        with torch.no_grad():
-            for x, y in testLoader:
-                x, y = x.to(device), y.to(device)
-                pred = model(x)
-                loss = criterion(pred, y)
-                testLossList.append(loss.item())
-        
-        testMeanLoss = sum(testLossList) / len(testLossList) if testLossList else 0
-        print(f"Test Loss (MSE): {testMeanLoss:.4f}")
+        if bestModelPath:
+            # Load best model
+            print(f"Loading best model from: {bestModelPath}")
+            model.load_state_dict(torch.load(bestModelPath))
+            model.eval()
+            
+            testLossList = []
+            with torch.no_grad():
+                for x, y in testLoader:
+                    x, y = x.to(device), y.to(device)
+                    pred = model(x)
+                    loss = criterion(pred, y)
+                    testLossList.append(loss.item())
+            
+            testMeanLoss = sum(testLossList) / len(testLossList) if testLossList else 0
+            print(f"Test Loss (MSE): {testMeanLoss:.4f}")
 
-        print(f"\nTraining Complete. Best Validation Loss: {bestLoss:.4f}")
-        print(f"Model saved to: {config['savePath']}")
+            print(f"\nTraining Complete. Best Validation Loss: {bestLoss:.4f}")
+            print(f"Model saved to: {bestModelPath}")
+        else:
+            print("No model was saved during training.")
 
     except Exception as e:
         print(f"\nAn error occurred: {e}")
