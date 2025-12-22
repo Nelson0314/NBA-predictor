@@ -8,6 +8,8 @@ from sklearn.model_selection import train_test_split
 import math
 import random
 import os
+import json
+import shutil
 from tqdm import tqdm
 
 # ==========================================
@@ -37,8 +39,13 @@ def loadAndPreprocessData(filePath, seqLength=10):
 
     # 定義特徵欄位與目標欄位
     featureCols = [
-        'PTS', 'REB', 'AST', 'FG_PCT', 'FG3_PCT', 'USG_PCT', 'MIN', 
-        'OFF_RATING', 'DEF_RATING', 'PACE', 'TS_PCT'
+        'PTS', 'AST', 'REB', 
+        'FGM', 'FGA', 'FG_PCT', 
+        'FG3M', 'FG3A', 'FG3_PCT', 
+        'FTM', 'FTA', 'FT_PCT', 
+        'OREB', 'DREB', 
+        'STL', 'BLK', 'TOV', 'PF', 
+        'PLUS_MINUS', 'MIN', 'USG_PCT', 'OFF_RATING', 'DEF_RATING', 'PACE', 'TS_PCT'
     ]
     targetCols = ['PTS', 'AST', 'REB'] 
 
@@ -143,9 +150,9 @@ class NbaTransformer(nn.Module):
         self.transformerEncoder = nn.TransformerEncoder(encoderLayer, num_layers=numLayers)
         
         self.decoder = nn.Sequential(
-            nn.Linear(dModel, 64),
-            nn.ReLU(),
-            nn.Linear(64, outputDim) 
+            nn.Linear(dModel, 32),
+            nn.GELU(),
+            nn.Linear(32, outputDim) 
         )
 
     def forward(self, x):
@@ -169,14 +176,14 @@ if __name__ == '__main__':
         'learningRate': 0.001,
         'dModel': 64,
         'nHead': 4,
-        'numLayers': 2,
+        'numLayers': 3,
         'dropout': 0.1,
         'saveDir': 'savedModels', # Changed from savePath to saveDir
         'datasetPath': 'dataset/games.csv',
         # 定義賽季切分
-        'trainSeasons': [22019, 22020, 22021, 22022],
+        'trainSeasons': [22016, 22017, 22018, 22019, 22020, 22021, 22022],
         'valSeasons': [22023], 
-        'testSeasons': [] # We will use live 2024-25 data for true testing in the notebook 
+        'testSeasons': [22024]
     }
 
     # 1. 初始化
@@ -300,37 +307,74 @@ if __name__ == '__main__':
             # --- Validation ---
             model.eval()
             valLossList = []
+            valSquaredErrorSum = np.zeros(len(targetCols))
+            valCount = 0
+
             with torch.no_grad():
                 for x, y in valLoader:
                     x, y = x.to(device), y.to(device)
                     pred = model(x)
                     loss = criterion(pred, y)
                     valLossList.append(loss.item())
+
+                    # Calculate Original Scale Metrics
+                    predOriginal = scalerY.inverse_transform(pred.cpu().numpy())
+                    yOriginal = scalerY.inverse_transform(y.cpu().numpy())
+                    
+                    diff = predOriginal - yOriginal
+                    valSquaredErrorSum += np.sum(diff ** 2, axis=0)
+                    valCount += len(y)
                     
             valMeanLoss = sum(valLossList) / len(valLossList)
             
+            # Avoid division by zero
+            if valCount > 0:
+                valMseOriginal = valSquaredErrorSum / valCount
+            else:
+                valMseOriginal = np.zeros(len(targetCols))
+            
             # Print 結果 (這會顯示在 Slurm 的 output file 中)
             print(f"Epoch [{epoch+1}/{config['nEpochs']}] | Train Loss: {trainMeanLoss:.4f} | Val Loss: {valMeanLoss:.4f}")
+            print(f"  >>> Val MSE (Original): {', '.join([f'{col}={val:.4f}' for col, val in zip(targetCols, valMseOriginal)])}")
+
 
             # 儲存最佳模型
             if valMeanLoss < bestLoss:
                 bestLoss = valMeanLoss
                 
-                # Delete previous best model if it exists
-                if bestModelPath and os.path.exists(bestModelPath):
-                    try:
-                        os.remove(bestModelPath)
-                        print(f"  >>> Removed previous best model: {bestModelPath}")
-                    except OSError as e:
-                        print(f"  >>> Error removing previous model: {e}")
-
-                # Dynamic Filename
-                modelFilename = f"best_model_ep{epoch+1}_loss{bestLoss:.4f}_seq{config['seqLength']}_d{config['dModel']}_head{config['nHead']}.ckpt"
-                savePath = os.path.join(config['saveDir'], modelFilename)
+                # Define Run Name (Used as Folder Name)
+                runName = f"best_run_ep{config['nEpochs']}_seq{config['seqLength']}_d{config['dModel']}_head{config['nHead']}_lr{config['learningRate']}_bs{config['batchSize']}"
+                runPath = os.path.join(config['saveDir'], runName)
                 
-                torch.save(model.state_dict(), savePath)
-                bestModelPath = savePath # Update best model path
-                print(f"  >>> New Best Model Saved: {savePath}")
+                # Cleanup previous best model folder if it exists and is different
+                if bestModelPath and os.path.exists(bestModelPath) and bestModelPath != runPath:
+                    try:
+                        shutil.rmtree(bestModelPath)
+                        print(f"  >>> Removed previous best run: {bestModelPath}")
+                    except OSError as e:
+                        print(f"  >>> Error removing previous run: {e}")
+
+                # Create new run folder
+                os.makedirs(runPath, exist_ok=True)
+                
+                # Save Model Checkpoint
+                ckptPath = os.path.join(runPath, 'model.ckpt')
+                torch.save(model.state_dict(), ckptPath)
+                
+                # Save Config as JSON
+                configPath = os.path.join(runPath, 'config.json')
+                # Add current featureCols to config for inference consistency
+                saveConfig = config.copy()
+                saveConfig['featureCols'] = featureCols
+                saveConfig['targetCols'] = targetCols
+                saveConfig['valid_mse'] = bestLoss
+                saveConfig['valid_mse_original'] = {col: val for col, val in zip(targetCols, valMseOriginal)}
+                
+                with open(configPath, 'w') as f:
+                    json.dump(saveConfig, f, indent=4)
+
+                bestModelPath = runPath
+                print(f"  >>> New Best Model & Config Saved to: {runPath}")
         
         # --- Testing Phase ---
         print("\nStep 4: Start Testing with Best Model...")
@@ -338,22 +382,55 @@ if __name__ == '__main__':
         if bestModelPath:
             # Load best model
             print(f"Loading best model from: {bestModelPath}")
-            model.load_state_dict(torch.load(bestModelPath))
+            ckptLoadPath = os.path.join(bestModelPath, 'model.ckpt')
+            model.load_state_dict(torch.load(ckptLoadPath))
             model.eval()
             
             testLossList = []
+            testSquaredErrorSum = np.zeros(len(targetCols))
+            testCount = 0
+
             with torch.no_grad():
                 for x, y in testLoader:
                     x, y = x.to(device), y.to(device)
                     pred = model(x)
                     loss = criterion(pred, y)
                     testLossList.append(loss.item())
+
+                    # Calculate Original Scale Metrics
+                    predOriginal = scalerY.inverse_transform(pred.cpu().numpy())
+                    yOriginal = scalerY.inverse_transform(y.cpu().numpy())
+                    
+                    diff = predOriginal - yOriginal
+                    testSquaredErrorSum += np.sum(diff ** 2, axis=0)
+                    testCount += len(y)
             
             testMeanLoss = sum(testLossList) / len(testLossList) if testLossList else 0
-            print(f"Test Loss (MSE): {testMeanLoss:.4f}")
-
+            
+            if testCount > 0:
+                testMseOriginal = testSquaredErrorSum / testCount
+            else:
+                testMseOriginal = np.zeros(len(targetCols))
             print(f"\nTraining Complete. Best Validation Loss: {bestLoss:.4f}")
+            print(f"Test Loss (MSE): {testMeanLoss:.4f}")
+            print(f"Test MSE (Original): {', '.join([f'{col}={val:.4f}' for col, val in zip(targetCols, testMseOriginal)])}")
             print(f"Model saved to: {bestModelPath}")
+
+            # Append Test Metric to Config
+            configPath = os.path.join(bestModelPath, 'config.json')
+            if os.path.exists(configPath):
+                try:
+                    with open(configPath, 'r') as f:
+                        finalConfig = json.load(f)
+                    
+                    finalConfig['test_mse'] = testMeanLoss
+                    finalConfig['test_mse_original'] = {col: val for col, val in zip(targetCols, testMseOriginal)}
+                    
+                    with open(configPath, 'w') as f:
+                        json.dump(finalConfig, f, indent=4)
+                    print("  >>> Updated config.json with Test MSE.")
+                except Exception as e:
+                    print(f"  >>> Warning: Could not update config with test loss: {e}")
         else:
             print("No model was saved during training.")
 

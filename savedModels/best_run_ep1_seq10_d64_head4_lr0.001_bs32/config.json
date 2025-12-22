@@ -1,0 +1,72 @@
+{
+    "seed": 42,
+    "seqLength": 10,
+    "batchSize": 32,
+    "nEpochs": 1,
+    "learningRate": 0.001,
+    "dModel": 64,
+    "nHead": 4,
+    "numLayers": 3,
+    "dropout": 0.1,
+    "saveDir": "savedModels",
+    "datasetPath": "dataset/games.csv",
+    "trainSeasons": [
+        22016,
+        22017,
+        22018,
+        22019,
+        22020,
+        22021,
+        22022
+    ],
+    "valSeasons": [
+        22023
+    ],
+    "testSeasons": [
+        22024
+    ],
+    "featureCols": [
+        "PTS",
+        "AST",
+        "REB",
+        "FGM",
+        "FGA",
+        "FG_PCT",
+        "FG3M",
+        "FG3A",
+        "FG3_PCT",
+        "FTM",
+        "FTA",
+        "FT_PCT",
+        "OREB",
+        "DREB",
+        "STL",
+        "BLK",
+        "TOV",
+        "PF",
+        "PLUS_MINUS",
+        "MIN",
+        "USG_PCT",
+        "OFF_RATING",
+        "DEF_RATING",
+        "PACE",
+        "TS_PCT"
+    ],
+    "targetCols": [
+        "PTS",
+        "AST",
+        "REB"
+    ],
+    "valid_mse": 0.5890605302929516,
+    "valid_mse_original": {
+        "PTS": 50.21660675912807,
+        "AST": 4.927855635513807,
+        "REB": 7.468641144138041
+    },
+    "test_mse": 0.6306632975144173,
+    "test_mse_original": {
+        "PTS": 52.064159438861836,
+        "AST": 5.422165130458038,
+        "REB": 8.018209099685858
+    }
+}
