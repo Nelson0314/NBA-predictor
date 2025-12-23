@@ -108,8 +108,9 @@ def createCnnSequences(gamesData, shotsGrouped, seqLength, targetCols):
     print("Step 2: Generating Heatmaps & Targets...")
     xList, yList = [], []
     
-    # 依球員與賽季分組
+    # 依球員與賽季分組 (確保不跨賽季, Make sure not to cross seasons)
     if 'SEASON_ID' not in gamesData.columns:
+        print("Warning: 'SEASON_ID' not found in data. Grouping by 'Player_ID' only.")
         groups = gamesData.groupby('Player_ID')
     else:
         groups = gamesData.groupby(['Player_ID', 'SEASON_ID'])

@@ -20,6 +20,7 @@ def fetchWithRetry(apiFunc, maxRetries=3, **kwargs):
             time.sleep(random.uniform(0.4, 0.8)) 
             return apiFunc(**kwargs)
         except (ReadTimeout, ConnectTimeout, urllib3.exceptions.ReadTimeoutError, ConnectionResetError):
+            print(f"   ⚠️ Timeout/Connection error. Retrying {i+1}/{maxRetries}...")
             time.sleep(3)
         except Exception:
             break
@@ -40,18 +41,19 @@ def main():
     dfGames = pd.read_csv(GAMES_PATH, low_memory=False)
     
     # 1. Deduplicate Games
+    # Ensure Game_ID and Player_ID are strings
+    dfGames['Game_ID'] = dfGames['Game_ID'].astype(str).str.split('.').str[0]
+    dfGames['Player_ID'] = dfGames['Player_ID'].astype(str).str.split('.').str[0]
+    
     dfGames, removed = clean_duplicates(dfGames, subset=['Game_ID', 'Player_ID'])
     if removed > 0:
-        print(f"   🧹 Removed {removed} duplicate rows from games data.")
-        # Optional: save back cleaned games
-        # dfGames.to_csv(GAMES_PATH, index=False) 
-    
-    # Clean Player_ID
-    dfGames['Player_ID'] = dfGames['Player_ID'].astype(str).apply(lambda x: x.split('.')[0])
-    dfGames['Game_ID'] = dfGames['Game_ID'].astype(str).apply(lambda x: x.split('.')[0])
+        print(f"   🧹 Removed {removed} duplicate rows from games data (in-memory).")
     
     # Identify unique Tasks (Player, Season)
+    # Season might be int or str, normalize to str
+    dfGames['Season'] = dfGames['Season'].astype(str)
     tasks = dfGames[['Player_ID', 'Season']].drop_duplicates().values.tolist()
+    
     print(f"📋 Found {len(tasks)} unique (Player, Season) pairs.")
     print(f"📋 Total Games expecting shots: {len(dfGames)}")
 
@@ -63,32 +65,23 @@ def main():
         print(f"⚠️ Found existing {OUTPUT_SHOTS_PATH}, reading to resume...")
         try:
             existingShots = pd.read_csv(OUTPUT_SHOTS_PATH, low_memory=False)
-            existingShots['Player_ID'] = existingShots['Player_ID'].astype(str).apply(lambda x: x.split('.')[0])
-            existingShots['GAME_ID'] = existingShots['GAME_ID'].astype(str).apply(lambda x: x.split('.')[0])
-            
-            # Identify which PID/Season are already "likely" complete
-            # Heuristic: If we have shots for Player P, we *might* assume his season is done?
-            # Safer: Look at the Games DataFrame vs Existing Shots match rate
-            # But "Resume" by season is faster. 
-            # Let's map downloaded GameIDs back to seasons to mark tasks as done.
-            downloadedGames = set(existingShots['GAME_ID'].unique())
-            
-            # Simple check: If a Player-Season pair has > 90% of its games in downloadedGames, skip it
-            # Pre-calculate counts
-            task_counts = dfGames.groupby(['Player_ID', 'Season']).size().to_dict()
-            
-            # Check overlap
-            for pid, seas in tasks:
-                # Get games for this task
-                task_game_ids = dfGames[(dfGames['Player_ID'] == pid) & (dfGames['Season'] == seas)]['Game_ID'].values
-                matches = sum(1 for gid in task_game_ids if gid in downloadedGames)
-                total = len(task_game_ids)
+            if not existingShots.empty:
+                existingShots['Player_ID'] = existingShots['Player_ID'].astype(str).str.split('.').str[0]
+                existingShots['GAME_ID'] = existingShots['GAME_ID'].astype(str).str.split('.').str[0]
                 
-                if total > 0 and (matches / total) > 0.9: # 90% tolerance for resume
-                    processed_pid_season.add((pid, seas))
+                downloadedGames = set(existingShots['GAME_ID'].unique())
+                
+                # Check which tasks are complete
+                for pid, seas in tasks:
+                    task_game_ids = dfGames[(dfGames['Player_ID'] == pid) & (dfGames['Season'] == seas)]['Game_ID'].values
+                    if len(task_game_ids) == 0: continue
                     
-            print(f"⏩ Skipping {len(processed_pid_season)} tasks that seem complete.")
-            
+                    matches = sum(1 for gid in task_game_ids if gid in downloadedGames)
+                    # If we found at least 90% of games, assume this season fetch was done
+                    if (matches / len(task_game_ids)) > 0.9:
+                        processed_pid_season.add((pid, seas))
+                        
+                print(f"⏩ Skipping {len(processed_pid_season)} tasks that ensure >90% coverage.")
         except Exception as e:
             print(f"⚠️ Error reading existing file: {e}. Starting fresh.")
             existingShots = pd.DataFrame()
@@ -96,62 +89,62 @@ def main():
     tasksToRun = [t for t in tasks if (str(t[0]), str(t[1])) not in processed_pid_season]
     
     batchShots = []
-    saveInterval = 20
-    count = 0
-
-    print(f"Step 2: Start Fetching Shost for {len(tasksToRun)} tasks...")
+    saveInterval = 20 # Save every 20 queries
     
-    for pid, season in tqdm(tasksToRun, desc="Fetching"):
-        try:
-            shotApi = fetchWithRetry(
-                shotchartdetail.ShotChartDetail,
-                team_id=0, player_id=pid, 
-                context_measure_simple='FGA', season_nullable=season
-            )
-            
-            if shotApi:
-                dfNew = shotApi.get_data_frames()[0]
-                if not dfNew.empty:
-                    # CRITICAL FIX: Add Player_ID
-                    dfNew['Player_ID'] = str(pid)
-                    
-                    # Ensure cols exist
-                    cols = ['Player_ID', 'GAME_ID', 'LOC_X', 'LOC_Y', 'SHOT_MADE_FLAG', 'SHOT_TYPE', 'ACTION_TYPE']
-                    validCols = [c for c in cols if c in dfNew.columns]
-                    
-                    dfNew = dfNew[validCols]
-                    batchShots.append(dfNew)
-                    count += 1
-            
-            # Incremental Save (Optimized: Append to list, then concat occasionally)
-            if len(batchShots) >= saveInterval:
-                if not existingShots.empty:
+    print(f"Step 2: Start Fetching Shots for {len(tasksToRun)} tasks...")
+    
+    try:
+        with tqdm(total=len(tasksToRun), desc="Fetching") as pbar:
+            for pid, season in tasksToRun:
+                pbar.set_description(f"Fetching {pid} - {season}")
+                shotApi = fetchWithRetry(
+                    shotchartdetail.ShotChartDetail,
+                    team_id=0, player_id=pid, 
+                    context_measure_simple='FGA', season_nullable=season
+                )
+                
+                if shotApi:
+                    dfNew = shotApi.get_data_frames()[0]
+                    if not dfNew.empty:
+                        # CRITICAL FIX: Add Player_ID
+                        dfNew['Player_ID'] = str(pid)
+                        dfNew['GAME_ID'] = dfNew['GAME_ID'].astype(str)
+                        
+                        # Ensure cols exist
+                        cols = ['Player_ID', 'GAME_ID', 'LOC_X', 'LOC_Y', 'SHOT_MADE_FLAG', 'SHOT_TYPE', 'ACTION_TYPE']
+                        validCols = [c for c in cols if c in dfNew.columns]
+                        
+                        dfNew = dfNew[validCols]
+                        batchShots.append(dfNew)
+                
+                # Incremental Update to Memory & Disk
+                if len(batchShots) >= saveInterval:
                     dfCurrentBatch = pd.concat(batchShots, ignore_index=True)
-                    existingShots = pd.concat([existingShots, dfCurrentBatch], ignore_index=True)
-                else:
-                    existingShots = pd.concat(batchShots, ignore_index=True)
+                    if not existingShots.empty:
+                        existingShots = pd.concat([existingShots, dfCurrentBatch], ignore_index=True)
+                    else:
+                        existingShots = dfCurrentBatch
+                    
+                    # Deduplicate before save to keep size manageable
+                    existingShots, _ = clean_duplicates(existingShots, subset=['GAME_ID', 'LOC_X', 'LOC_Y', 'SHOT_TYPE'])
+                    existingShots.to_csv(OUTPUT_SHOTS_PATH, index=False)
+                    batchShots = [] # Clear batch LIST, but keep main DF
+                    
+                pbar.update(1)
                 
-                # Save checkpoint
-                existingShots.to_csv(OUTPUT_SHOTS_PATH, index=False)
-                batchShots = [] # Clear memory
-                
-        except Exception as e:
-            print(f"Error fetching {pid} {season}: {e}")
+    except KeyboardInterrupt:
+        print("\n🛑 Interrupted by user. Saving progress...")
 
-    # Final Merge
+    # Final Merge & Save
     if batchShots:
+        dfCurrentBatch = pd.concat(batchShots, ignore_index=True)
         if not existingShots.empty:
-            dfCurrentBatch = pd.concat(batchShots, ignore_index=True)
             existingShots = pd.concat([existingShots, dfCurrentBatch], ignore_index=True)
         else:
-            existingShots = pd.concat(batchShots, ignore_index=True)
+            existingShots = dfCurrentBatch
 
-    print("Step 3: Verification & Dedup...")
+    print("\nStep 3: Final Verification & Deduplication...")
     if not existingShots.empty:
-        # Standardize ID formats
-        existingShots['Player_ID'] = existingShots['Player_ID'].astype(str).apply(lambda x: x.split('.')[0])
-        existingShots['GAME_ID'] = existingShots['GAME_ID'].astype(str).apply(lambda x: x.split('.')[0])
-        
         # Deduplication
         existingShots, removed = clean_duplicates(existingShots, subset=['GAME_ID', 'LOC_X', 'LOC_Y', 'SHOT_TYPE'])
         print(f"🧹 Removed {removed} duplicate shots.")
@@ -168,13 +161,13 @@ def main():
         if len(missing) > 0 and len(missing) < 50:
             print(f"⚠️ Missing Game IDs: {list(missing)}")
         elif len(missing) >= 50:
-            print(f"⚠️ Missing {len(missing)} games. (Use 'missing' list to debug if needed)")
+            print(f"⚠️ Missing {len(missing)} games. (Check network or missing data source)")
 
         # Save Final
         existingShots.to_csv(OUTPUT_SHOTS_PATH, index=False)
         print(f"✅ Final validated data saved to {OUTPUT_SHOTS_PATH}")
     else:
-        print("❌ No shots data found.")
+        print("❌ No shots data collected.")
 
 if __name__ == "__main__":
     main()
