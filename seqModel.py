@@ -330,12 +330,13 @@ if __name__ == '__main__':
             # Avoid division by zero
             if valCount > 0:
                 valMseOriginal = valSquaredErrorSum / valCount
+                valRmseOriginal = np.sqrt(valMseOriginal)
             else:
-                valMseOriginal = np.zeros(len(targetCols))
+                valRmseOriginal = np.zeros(len(targetCols))
             
             # Print 結果 (這會顯示在 Slurm 的 output file 中)
             print(f"Epoch [{epoch+1}/{config['nEpochs']}] | Train Loss: {trainMeanLoss:.4f} | Val Loss: {valMeanLoss:.4f}")
-            print(f"  >>> Val MSE (Original): {', '.join([f'{col}={val:.4f}' for col, val in zip(targetCols, valMseOriginal)])}")
+            print(f"  >>> Val RMSE (Original): {', '.join([f'{col}={val:.4f}' for col, val in zip(targetCols, valRmseOriginal)])}")
 
 
             # 儲存最佳模型
@@ -368,7 +369,7 @@ if __name__ == '__main__':
                 saveConfig['featureCols'] = featureCols
                 saveConfig['targetCols'] = targetCols
                 saveConfig['valid_mse'] = bestLoss
-                saveConfig['valid_mse_original'] = {col: val for col, val in zip(targetCols, valMseOriginal)}
+                saveConfig['valid_rmse_original'] = {col: val for col, val in zip(targetCols, valRmseOriginal)}
                 
                 with open(configPath, 'w') as f:
                     json.dump(saveConfig, f, indent=4)
@@ -409,11 +410,12 @@ if __name__ == '__main__':
             
             if testCount > 0:
                 testMseOriginal = testSquaredErrorSum / testCount
+                testRmseOriginal = np.sqrt(testMseOriginal)
             else:
-                testMseOriginal = np.zeros(len(targetCols))
+                testRmseOriginal = np.zeros(len(targetCols))
             print(f"\nTraining Complete. Best Validation Loss: {bestLoss:.4f}")
             print(f"Test Loss (MSE): {testMeanLoss:.4f}")
-            print(f"Test MSE (Original): {', '.join([f'{col}={val:.4f}' for col, val in zip(targetCols, testMseOriginal)])}")
+            print(f"Test RMSE (Original): {', '.join([f'{col}={val:.4f}' for col, val in zip(targetCols, testRmseOriginal)])}")
             print(f"Model saved to: {bestModelPath}")
 
             # Append Test Metric to Config
@@ -424,7 +426,7 @@ if __name__ == '__main__':
                         finalConfig = json.load(f)
                     
                     finalConfig['test_mse'] = testMeanLoss
-                    finalConfig['test_mse_original'] = {col: val for col, val in zip(targetCols, testMseOriginal)}
+                    finalConfig['test_rmse_original'] = {col: val for col, val in zip(targetCols, testRmseOriginal)}
                     
                     with open(configPath, 'w') as f:
                         json.dump(finalConfig, f, indent=4)
