@@ -108,12 +108,7 @@ def createCnnSequences(gamesData, shotsGrouped, seqLength, targetCols):
     print("Step 2: Generating Heatmaps & Targets...")
     xList, yList = [], []
     
-    # 依球員與賽季分組 (確保不跨賽季, Make sure not to cross seasons)
-    if 'SEASON_ID' not in gamesData.columns:
-        print("Warning: 'SEASON_ID' not found in data. Grouping by 'Player_ID' only.")
-        groups = gamesData.groupby('Player_ID')
-    else:
-        groups = gamesData.groupby(['Player_ID', 'SEASON_ID'])
+    groups = gamesData.groupby(['Player_ID', 'SEASON_ID']) if 'SEASON_ID' in gamesData.columns else gamesData.groupby('Player_ID')
 
     for groupKey, group in tqdm(groups, desc="Processing Players"):
         if len(group) <= seqLength:
@@ -126,26 +121,29 @@ def createCnnSequences(gamesData, shotsGrouped, seqLength, targetCols):
         
         # 滑動視窗
         for i in range(len(group) - seqLength):
-            # 目標：預測第 i + seqLength 場的數據
             target = targets[i + seqLength]
-            
-            # 輸入：過去 seqLength 場比賽 (i 到 i+seqLength-1) 的投籃數據總和
-            # 我們將這幾場比賽的投籃合併，畫成一張「近期手感熱圖」
             pastGameIds = gameIds[i : i + seqLength]
             
-            relevantShots = []
+            # Result Shape: (seqLength * 2, 50, 50)
+            dailyHeatmaps = []
+            
             for gid in pastGameIds:
                 key = (playerId, gid)
                 if key in shotsGrouped:
-                    relevantShots.append(shotsGrouped[key])
-            
-            if len(relevantShots) > 0:
-                mergedShots = pd.concat(relevantShots)
-                # 生成熱力圖 Tensor (2, 50, 50)
-                heatmap = generateHeatmap(mergedShots)
+                    # 單場比賽熱圖 (2, 50, 50)
+                    h = generateHeatmap(shotsGrouped[key])
+                else:
+                    # 缺少投籃數據，補零圖
+                    h = torch.zeros((2, 50, 50), dtype=torch.float32)
                 
-                xList.append(heatmap.numpy()) # 轉 numpy 存比較省空間
-                yList.append(target)
+                dailyHeatmaps.append(h.numpy())
+
+            # Stack along channel dimension (axis=0)
+            # List of N items of shape (2, 50, 50) -> (2*N, 50, 50)
+            stackedInput = np.concatenate(dailyHeatmaps, axis=0)
+
+            xList.append(stackedInput)
+            yList.append(target)
             
     return np.array(xList), np.array(yList)
 
@@ -170,13 +168,14 @@ class NbaCnnDataset(Dataset):
 # 4. 模型架構 (CNN)
 # ==========================================
 class NbaCnn(nn.Module):
-    def __init__(self, outputDim):
+    def __init__(self, outputDim, inputChannels=2):
         super(NbaCnn, self).__init__()
         
-        # Input: (Batch, 2, 50, 50)
+        # Input: (Batch, inputChannels, 50, 50)
+        # inputChannels = seqLength * 2 (because of Channel Stacking)
         self.features = nn.Sequential(
             # Conv Block 1
-            nn.Conv2d(2, 16, kernel_size=3, padding=1), # -> (16, 50, 50)
+            nn.Conv2d(inputChannels, 16, kernel_size=3, padding=1), # -> (16, 50, 50)
             nn.BatchNorm2d(16),
             nn.ReLU(),
             nn.MaxPool2d(2, 2), # -> (16, 25, 25)
@@ -262,7 +261,7 @@ if __name__ == '__main__':
         xTest, yTest = createCnnSequences(testGames, shotsGrouped, config['seqLength'], targetCols)
 
         print(f"\nTensor Shapes:")
-        print(f"  Train: x={xTrain.shape}, y={yTrain.shape}") # Expect (N, 2, 50, 50)
+        print(f"  Train: x={xTrain.shape}, y={yTrain.shape}") # Expect (N, seq*2, 50, 50)
         
         if len(xTrain) == 0:
             raise ValueError("No training data generated!")
@@ -283,7 +282,10 @@ if __name__ == '__main__':
         testLoader = DataLoader(testDataset, batch_size=config['batchSize'], shuffle=False, num_workers=0)
 
         # 3. 建立模型 (CNN)
-        model = NbaCnn(outputDim=len(targetCols)).to(device)
+        # Input Channels = seqLength * 2 (每場比賽 2 個 channel: Attempts, Made)
+        inputCh = config['seqLength'] * 2
+        print(f"Model Input Channels: {inputCh}")
+        model = NbaCnn(outputDim=len(targetCols), inputChannels=inputCh).to(device)
 
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=config['learningRate'])
