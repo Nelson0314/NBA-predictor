@@ -82,7 +82,7 @@ def loadAndPreprocessData(gamesPath, shotsPath):
     targetCols = ['PTS', 'AST', 'REB']
     
     # 清洗 Games Data
-    gamesData['GAME_DATE'] = pd.to_datetime(gamesData['GAME_DATE'])
+    gamesData['GAME_DATE'] = pd.to_datetime(gamesData['GAME_DATE'], format='mixed')
     for col in targetCols:
         gamesData[col] = pd.to_numeric(gamesData[col], errors='coerce')
     gamesData = gamesData.dropna(subset=targetCols)
