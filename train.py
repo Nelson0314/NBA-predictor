@@ -11,7 +11,8 @@ import random
 import argparse
 
 # Import local modules
-from multiModel import NbaMultimodal, loadAndPreprocessData, createMultimodalSequences, MultimodalDataset
+# 注意這裡新增了 preloadHeatmaps
+from multiModel import NbaMultimodal, loadAndPreprocessData, createMultimodalSequences, MultimodalDataset, preloadHeatmaps
 from seqModel import train as train_seq
 from graphModel import train as train_cnn
 
@@ -34,12 +35,12 @@ def parse_args():
     parser.add_argument('--seqLength', type=int, default=10, help='Sequence length')
     parser.add_argument('--batchSize', type=int, default=32, help='Batch size')
     parser.add_argument('--nEpochs', type=int, default=20, help='Number of epochs')
-    parser.add_argument('--learningRate', type=float, default=1e-3, help='Learning rate')
+    parser.add_argument('--learningRate', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--cnnEmbedDim', type=int, default=64, help='CNN embedding dimension')
-    parser.add_argument('--statEmbedDim', type=int, default=32, help='Statistical embedding dimension')
-    parser.add_argument('--dModel', type=int, default=128, help='Model dimension (Transformer)')
-    parser.add_argument('--nHead', type=int, default=4, help='Number of heads (Transformer)')
-    parser.add_argument('--numLayers', type=int, default=3, help='Number of layers (Transformer)')
+    parser.add_argument('--statEmbedDim', type=int, default=128, help='Statistical embedding dimension')
+    parser.add_argument('--dModel', type=int, default=256, help='Model dimension (Transformer)')
+    parser.add_argument('--nHead', type=int, default=8, help='Number of heads (Transformer)')
+    parser.add_argument('--numLayers', type=int, default=4, help='Number of layers (Transformer)')
     parser.add_argument('--dropout', type=float, default=0.2, help='Dropout rate')
     parser.add_argument('--saveDir', type=str, default='savedMultimodalModels', help='Directory to save models')
     parser.add_argument('--gamesPath', type=str, default='dataset/games.csv', help='Path to games.csv')
@@ -75,18 +76,22 @@ def train_multi(config):
 
         print(f"Split: Train={len(trainData)}, Val={len(valData)}, Test={len(testData)}")
 
-        # --- Generate Sequences & Pre-compute Images ---
+        # --- Generate Sequences ---
         print("\nGenerating Train Sequences...")
-        xImgTrain, xStatTrain, yTrain = createMultimodalSequences(trainData, shotsGrouped, config['seqLength'], featureCols, targetCols)
+        xPlayerTrain, xGameTrain, xStatTrain, yTrain = createMultimodalSequences(trainData, shotsGrouped, config['seqLength'], featureCols, targetCols)
         
         print("Generating Val Sequences...")
-        xImgVal, xStatVal, yVal = createMultimodalSequences(valData, shotsGrouped, config['seqLength'], featureCols, targetCols)
+        xPlayerVal, xGameVal, xStatVal, yVal = createMultimodalSequences(valData, shotsGrouped, config['seqLength'], featureCols, targetCols)
         
         print("Generating Test Sequences...")
-        xImgTest, xStatTest, yTest = createMultimodalSequences(testData, shotsGrouped, config['seqLength'], featureCols, targetCols)
+        xPlayerTest, xGameTest, xStatTest, yTest = createMultimodalSequences(testData, shotsGrouped, config['seqLength'], featureCols, targetCols)
 
-        if len(xImgTrain) == 0:
+        if len(xStatTrain) == 0:
             raise ValueError("No training data generated!")
+        
+        # --- Preload Heatmaps into RAM (Fix Speed Issue) ---
+        print("\nPre-loading Heatmaps into RAM...")
+        heatmapCache = preloadHeatmaps('dataset/heatmaps')
 
         # --- Scaling (Stats Only) ---
         print("\nScaling Data...")
@@ -105,13 +110,21 @@ def train_multi(config):
         yTestScaled = scalerY.transform(yTest)
 
         # --- Datasets & Loaders ---
-        trainDataset = MultimodalDataset(xImgTrain, xStatTrainScaled, yTrainScaled)
-        valDataset = MultimodalDataset(xImgVal, xStatValScaled, yValScaled)
-        testDataset = MultimodalDataset(xImgTest, xStatTestScaled, yTestScaled)
+        # Pass heatmapCache to Dataset
+        trainDataset = MultimodalDataset(xPlayerTrain, xGameTrain, xStatTrainScaled, heatmapCache, yTrainScaled)
+        valDataset = MultimodalDataset(xPlayerVal, xGameVal, xStatValScaled, heatmapCache, yValScaled)
+        testDataset = MultimodalDataset(xPlayerTest, xGameTest, xStatTestScaled, heatmapCache, yTestScaled)
 
-        trainLoader = DataLoader(trainDataset, batch_size=config['batchSize'], shuffle=True, drop_last=True, num_workers=0)
-        valLoader = DataLoader(valDataset, batch_size=config['batchSize'], shuffle=False, num_workers=0)
-        testLoader = DataLoader(testDataset, batch_size=config['batchSize'], shuffle=False, num_workers=0)
+        if os.name == 'nt':
+            num_workers = 0 # RAM Cache is fast enough, using 0 workers on Windows prevents spawn overhead
+            persistent_workers = False
+        else:
+            num_workers = 4
+            persistent_workers = True
+
+        trainLoader = DataLoader(trainDataset, batch_size=config['batchSize'], shuffle=True, drop_last=True, num_workers=num_workers, pin_memory=True, persistent_workers=persistent_workers)
+        valLoader = DataLoader(valDataset, batch_size=config['batchSize'], shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=persistent_workers)
+        testLoader = DataLoader(testDataset, batch_size=config['batchSize'], shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=persistent_workers)
 
         # --- Model Initialization ---
         model = NbaMultimodal(
@@ -224,6 +237,56 @@ def train_multi(config):
 
         print(f"\nTraining Complete. Best Val Loss: {bestLoss:.4f}")
         print(f"Model saved to: {bestModelPath}")
+
+        # --- Test Phase ---
+        print("\nStep 4: Start Testing with Best Model...")
+        if bestModelPath:
+            # Load Best Model
+            model.load_state_dict(torch.load(os.path.join(bestModelPath, 'model.ckpt')))
+            model.eval()
+
+            testLosses = []
+            testDiffSqSum = np.zeros(len(targetCols))
+            testCount = 0
+
+            with torch.no_grad():
+                for xImg, xStat, y in testLoader:
+                    xImg, xStat, y = xImg.to(device), xStat.to(device), y.to(device)
+                    pred = model(xImg, xStat)
+                    loss = criterion(pred, y)
+                    testLosses.append(loss.item())
+
+                    # Metrics (Original Scale)
+                    predOrig = scalerY.inverse_transform(pred.cpu().numpy())
+                    predOrig = np.maximum(predOrig, 0)
+                    yOrig = scalerY.inverse_transform(y.cpu().numpy())
+                    diff = predOrig - yOrig
+                    testDiffSqSum += np.sum(diff**2, axis=0)
+                    testCount += len(y)
+            
+            testMeanLoss = np.mean(testLosses) if testLosses else 0
+            if testCount > 0:
+                testRmse = np.sqrt(testDiffSqSum / testCount)
+            else:
+                testRmse = np.zeros(len(targetCols))
+            
+            print(f"Test Loss (MSE): {testMeanLoss:.4f}")
+            print(f"Test RMSE: {', '.join([f'{c}={v:.4f}' for c, v in zip(targetCols, testRmse)])}")
+
+            # Update Config
+            configPath = os.path.join(bestModelPath, 'config.json')
+            if os.path.exists(configPath):
+                with open(configPath, 'r') as f:
+                    finalConfig = json.load(f)
+                
+                finalConfig['test_mse'] = testMeanLoss
+                finalConfig['test_rmse'] = {c: v for c, v in zip(targetCols, testRmse)}
+                
+                with open(configPath, 'w') as f:
+                    json.dump(finalConfig, f, indent=4)
+                print("  >>> Updated config.json with Test metrics.")
+        else:
+            print("No model was saved.")
 
     except Exception as e:
         print(f"An error occurred: {e}")

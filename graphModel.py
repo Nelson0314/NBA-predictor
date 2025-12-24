@@ -367,6 +367,8 @@ def train(config):
                 # Config
                 saveConfig = config.copy()
                 saveConfig['valid_mse'] = bestLoss
+                saveConfig['valid_rmse'] = {c: v for c, v in zip(targetCols, valRmseOriginal)}
+                
                 with open(os.path.join(runPath, 'config.json'), 'w') as f:
                     json.dump(saveConfig, f, indent=4)
 
@@ -409,6 +411,19 @@ def train(config):
             print(f"Test Loss (MSE): {testMeanLoss:.4f}")
             print(f"Test RMSE: {', '.join([f'{col}={val:.4f}' for col, val in zip(targetCols, testRmseOriginal)])}")
             print(f"Model saved to: {bestModelPath}")
+
+            # Update Config with Test Results
+            configPath = os.path.join(bestModelPath, 'config.json')
+            if os.path.exists(configPath):
+                with open(configPath, 'r') as f:
+                    finalConfig = json.load(f)
+                
+                finalConfig['test_mse'] = testMeanLoss
+                finalConfig['test_rmse'] = {c: v for c, v in zip(targetCols, testRmseOriginal)}
+                
+                with open(configPath, 'w') as f:
+                    json.dump(finalConfig, f, indent=4)
+                print("  >>> Updated config.json with Test metrics.")
 
     except Exception as e:
         print(f"\\nAn error occurred: {e}")

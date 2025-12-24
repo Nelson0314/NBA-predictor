@@ -93,6 +93,18 @@ def loadAndPreprocessData(filePath, seqLength=10):
         gamesData[new_c] = gamesData.groupby(['Player_ID', 'SEASON_ID'])[c].transform(lambda x: x.expanding().mean().shift(1)).fillna(0)
         
     featureCols.extend(new_p_cols)
+
+    # ---------------------------------------------------------
+    # Feature: Days Since Last Game
+    # ---------------------------------------------------------
+    print("Calculating Days Since Last Game...")
+    # Calculate days diff for each player
+    gamesData['DAYS_SINCE_LAST_GAME'] = gamesData.groupby('Player_ID')['GAME_DATE'].diff().dt.days
+    
+    # Fill NaN with default (e.g., 7 days)
+    gamesData['DAYS_SINCE_LAST_GAME'] = gamesData['DAYS_SINCE_LAST_GAME'].fillna(7)
+    
+    featureCols.append('DAYS_SINCE_LAST_GAME')
     
     print(f"Features: {len(featureCols)}")
     return gamesData, featureCols, targetCols
@@ -383,7 +395,7 @@ def train(config):
                 saveConfig['featureCols'] = featureCols
                 saveConfig['targetCols'] = targetCols
                 saveConfig['valid_mse'] = bestLoss
-                saveConfig['valid_rmse_original'] = {col: val for col, val in zip(targetCols, valRmseOriginal)}
+                saveConfig['valid_rmse'] = {col: val for col, val in zip(targetCols, valRmseOriginal)}
                 
                 with open(configPath, 'w') as f:
                     json.dump(saveConfig, f, indent=4)
@@ -440,7 +452,7 @@ def train(config):
                         finalConfig = json.load(f)
                     
                     finalConfig['test_mse'] = testMeanLoss
-                    finalConfig['test_rmse_original'] = {col: val for col, val in zip(targetCols, testRmseOriginal)}
+                    finalConfig['test_rmse'] = {col: val for col, val in zip(targetCols, testRmseOriginal)}
                     
                     with open(configPath, 'w') as f:
                         json.dump(finalConfig, f, indent=4)
