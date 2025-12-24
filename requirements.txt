@@ -1,5 +1,11 @@
-requests 
+requests
 pandas
 nba_api
 seaborn
 xgboost
+numpy
+matplotlib
+scipy
+scikit-learn
+torch
+tqdm
