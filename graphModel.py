@@ -436,7 +436,7 @@ if __name__ == '__main__':
         'batchSize': 32,
         'nEpochs': 20,
         'learningRate': 0.001,
-        'saveDir': 'savedCnnModels',
+        'saveDir': 'savedModels',
         'gamesPath': 'dataset/games.csv',
         'shotsPath': 'dataset/shots.csv', # 必須有 shots.csv
         'trainSeasons': [22016, 22017, 22018, 22019, 22020, 22021, 22022],

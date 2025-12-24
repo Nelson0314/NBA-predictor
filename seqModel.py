@@ -479,7 +479,7 @@ if __name__ == '__main__':
         'nHead': 4,
         'numLayers': 3,
         'dropout': 0.1,
-        'saveDir': 'savedSeqModels',
+        'saveDir': 'savedModels',
         'datasetPath': 'dataset/games.csv',
         # 定義賽季切分
         'trainSeasons': [22016, 22017, 22018, 22019, 22020, 22021, 22022],

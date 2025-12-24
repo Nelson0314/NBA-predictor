@@ -15,6 +15,7 @@ import argparse
 from multiModel import NbaMultimodal, loadAndPreprocessData, createMultimodalSequences, MultimodalDataset, preloadHeatmaps
 from seqModel import train as train_seq
 from graphModel import train as train_cnn
+from comparison import train_baselines_and_compare
 
 # ==========================================
 # 1. 固定隨機種子 (Set Seed)
@@ -35,14 +36,14 @@ def parse_args():
     parser.add_argument('--seqLength', type=int, default=10, help='Sequence length')
     parser.add_argument('--batchSize', type=int, default=32, help='Batch size')
     parser.add_argument('--nEpochs', type=int, default=20, help='Number of epochs')
-    parser.add_argument('--learningRate', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--learningRate', type=float, default=5e-4, help='Learning rate')
     parser.add_argument('--cnnEmbedDim', type=int, default=64, help='CNN embedding dimension')
     parser.add_argument('--statEmbedDim', type=int, default=128, help='Statistical embedding dimension')
-    parser.add_argument('--dModel', type=int, default=256, help='Model dimension (Transformer)')
+    parser.add_argument('--dModel', type=int, default=128, help='Model dimension (Transformer)')
     parser.add_argument('--nHead', type=int, default=8, help='Number of heads (Transformer)')
     parser.add_argument('--numLayers', type=int, default=4, help='Number of layers (Transformer)')
-    parser.add_argument('--dropout', type=float, default=0.2, help='Dropout rate')
-    parser.add_argument('--saveDir', type=str, default='savedMultimodalModels', help='Directory to save models')
+    parser.add_argument('--dropout', type=float, default=0.3, help='Dropout rate')
+    parser.add_argument('--saveDir', type=str, default='savedModels', help='Directory to save models')
     parser.add_argument('--gamesPath', type=str, default='dataset/games.csv', help='Path to games.csv')
     parser.add_argument('--shotsPath', type=str, default='dataset/shots.csv', help='Path to shots.csv')
     parser.add_argument('--teamsPath', type=str, default='dataset/teams.csv', help='Path to teams.csv')
@@ -337,3 +338,6 @@ if __name__ == '__main__':
             train_cnn(config)
         else:
             print(f"Unknown model type: {model_name}")
+
+    # After all requested models are trained, run the baseline comparison
+    train_baselines_and_compare(config)
