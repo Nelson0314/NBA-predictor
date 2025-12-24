@@ -36,6 +36,7 @@ def loadAndPreprocessData(filePath, seqLength=10):
         raise FileNotFoundError(f"Data file not found at: {filePath}")
         
     gamesData = pd.read_csv(filePath, low_memory=False)
+    gamesData = gamesData.loc[:, ~gamesData.columns.duplicated()]
 
     # 定義特徵欄位與目標欄位
     featureCols = [
@@ -50,9 +51,10 @@ def loadAndPreprocessData(filePath, seqLength=10):
     targetCols = ['PTS', 'AST', 'REB'] 
 
     # 強制將數值欄位轉為數字，無法轉換的變成 NaN (處理 Dirty Data)
-    allCols = featureCols + targetCols
+    allCols = list(set(featureCols + targetCols))
     for col in allCols:
-        gamesData[col] = pd.to_numeric(gamesData[col], errors='coerce')
+        if col in gamesData.columns:
+            gamesData[col] = pd.to_numeric(gamesData[col], errors='coerce')
 
     # 移除髒資料
     gamesData = gamesData.dropna(subset=allCols)
@@ -65,6 +67,34 @@ def loadAndPreprocessData(filePath, seqLength=10):
     gamesData = gamesData.sort_values(by=['Player_ID', 'GAME_DATE']).reset_index(drop=True)
 
     print(f"Data Loaded. Total Records: {len(gamesData)}")
+    
+    # ---------------------------------------------------------
+    # Feature Engineering (Season-to-Date)
+    # ---------------------------------------------------------
+    print("Calculating Rolling Features...")
+    
+    # Parse Matchup for Opponent
+    def parse_matchup(m):
+        if pd.isna(m): return None
+        if ' vs. ' in m: return m.split(' vs. ')[1]
+        if ' @ ' in m: return m.split(' @ ')[1]
+        return None
+
+    gamesData['OPPONENT_ABBREVIATION'] = gamesData['MATCHUP'].apply(parse_matchup)
+    
+    # Sort
+    gamesData = gamesData.sort_values(by=['Player_ID', 'SEASON_ID', 'GAME_DATE'])
+    
+    # Player Rolling
+    p_cols = ['PTS', 'AST', 'REB']
+    new_p_cols = [f'PLAYER_AVG_{c}' for c in p_cols]
+    
+    for c, new_c in zip(p_cols, new_p_cols):
+        gamesData[new_c] = gamesData.groupby(['Player_ID', 'SEASON_ID'])[c].transform(lambda x: x.expanding().mean().shift(1)).fillna(0)
+        
+    featureCols.extend(new_p_cols)
+    
+    print(f"Features: {len(featureCols)}")
     return gamesData, featureCols, targetCols
 
 def createSequences(data, seqLength, featureCols, targetCols):

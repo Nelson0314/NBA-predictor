@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from scipy.ndimage import gaussian_filter   
 import math
 import random
@@ -94,10 +94,13 @@ def loadAndPreprocessData(gamesPath, shotsPath):
 
     # 建立快速索引 (為了在生成序列時快速抓取某場比賽的投籃)
     # Group by (Player_ID, GAME_ID)
-    print("Indexing shots data...")
-    shotsGrouped = dict(list(shotsData.groupby(['Player_ID', 'GAME_ID'])))
+    # 建立快速索引 (為了在生成序列時快速抓取某場比賽的投籃)
+    # Group by (Player_ID, GAME_ID)
+    # print("Indexing shots data...")
+    # shotsGrouped = dict(list(shotsData.groupby(['Player_ID', 'GAME_ID'])))
+    shotsGrouped = None # Use pre-generated heatmaps
 
-    print(f"Data Loaded. Games: {len(gamesData)}, Shot Groups: {len(shotsGrouped)}")
+    print(f"Data Loaded. Games: {len(gamesData)}, Shot Groups: (Loaded from disk)")
     return gamesData, shotsGrouped, targetCols
 
 def createCnnSequences(gamesData, shotsGrouped, seqLength, targetCols):
@@ -128,15 +131,22 @@ def createCnnSequences(gamesData, shotsGrouped, seqLength, targetCols):
             dailyHeatmaps = []
             
             for gid in pastGameIds:
-                key = (playerId, gid)
-                if key in shotsGrouped:
-                    # 單場比賽熱圖 (2, 50, 50)
-                    h = generateHeatmap(shotsGrouped[key])
-                else:
-                    # 缺少投籃數據，補零圖
-                    h = torch.zeros((2, 50, 50), dtype=torch.float32)
+                # Optimized: Load from disk
+                # key = (playerId, gid)
+                # if key in shotsGrouped:
+                #     # 單場比賽熱圖 (2, 50, 50)
+                #     h = generateHeatmap(shotsGrouped[key])
+                # else:
+                #     # 缺少投籃數據，補零圖
+                #     h = torch.zeros((2, 50, 50), dtype=torch.float32)
                 
-                dailyHeatmaps.append(h.numpy())
+                heatmapPath = os.path.join('dataset/heatmaps', f"{int(playerId)}_{str(gid).zfill(10)}.npy")
+                if os.path.exists(heatmapPath):
+                    h = np.load(heatmapPath) # (2, 50, 50)
+                else:
+                    h = np.zeros((2, 50, 50), dtype=np.float32)
+                
+                dailyHeatmaps.append(h)
 
             # Stack along channel dimension (axis=0)
             # List of N items of shape (2, 50, 50) -> (2*N, 50, 50)
@@ -267,7 +277,8 @@ if __name__ == '__main__':
             raise ValueError("No training data generated!")
 
         # 標準化 (Targets) - 圖片不需要 StandardScale，已經在 generateHeatmap 做過 MinMax
-        scalerY = StandardScaler()
+        # 標準化 (Targets) - 圖片不需要 StandardScale，已經在 generateHeatmap 做過 MinMax
+        scalerY = MinMaxScaler(feature_range=(0, 1))
         yTrainScaled = scalerY.fit_transform(yTrain)
         yValScaled = scalerY.transform(yVal)
         yTestScaled = scalerY.transform(yTest)
@@ -333,6 +344,7 @@ if __name__ == '__main__':
                     valLossList.append(loss.item())
 
                     predOriginal = scalerY.inverse_transform(pred.cpu().numpy())
+                    predOriginal = np.maximum(predOriginal, 0)
                     yOriginal = scalerY.inverse_transform(y.cpu().numpy())
                     
                     diff = predOriginal - yOriginal
@@ -394,6 +406,7 @@ if __name__ == '__main__':
                     testLossList.append(loss.item())
 
                     predOriginal = scalerY.inverse_transform(pred.cpu().numpy())
+                    predOriginal = np.maximum(predOriginal, 0)
                     yOriginal = scalerY.inverse_transform(y.cpu().numpy())
                     
                     diff = predOriginal - yOriginal
