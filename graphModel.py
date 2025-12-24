@@ -224,22 +224,8 @@ class NbaCnn(nn.Module):
 # ==========================================
 # 5. 主程式 (Main Execution)
 # ==========================================
-if __name__ == '__main__':
-    # 設定參數
-    config = {
-        'seed': 42,
-        'seqLength': 5, # 累積過去 5 場的熱圖
-        'batchSize': 32,
-        'nEpochs': 20,
-        'learningRate': 0.001,
-        'saveDir': 'savedCnnModels',
-        'gamesPath': 'dataset/games.csv',
-        'shotsPath': 'dataset/shots.csv', # 必須有 shots.csv
-        'trainSeasons': [22016, 22017, 22018, 22019, 22020, 22021, 22022],
-        'valSeasons': [22023], 
-        'testSeasons': [22024]
-    }
 
+def train(config):
     # 1. 初始化
     setSeed(config['seed'])
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -261,7 +247,7 @@ if __name__ == '__main__':
 
         # 產生圖像序列
         # 注意：這一步會比純數值運算慢，因為要動態生成圖片
-        print("\nCreating Heatmaps for Training Set...")
+        print("\\nCreating Heatmaps for Training Set...")
         xTrain, yTrain = createCnnSequences(trainGames, shotsGrouped, config['seqLength'], targetCols)
         
         print("Creating Heatmaps for Validation Set...")
@@ -270,7 +256,7 @@ if __name__ == '__main__':
         print("Creating Heatmaps for Test Set...")
         xTest, yTest = createCnnSequences(testGames, shotsGrouped, config['seqLength'], targetCols)
 
-        print(f"\nTensor Shapes:")
+        print(f"\\nTensor Shapes:")
         print(f"  Train: x={xTrain.shape}, y={yTrain.shape}") # Expect (N, seq*2, 50, 50)
         
         if len(xTrain) == 0:
@@ -388,7 +374,7 @@ if __name__ == '__main__':
                 print(f"  >>> New Best Model Saved to: {runPath}")
         
         # --- Testing Phase ---
-        print("\nStep 4: Start Testing with Best Model...")
+        print("\\nStep 4: Start Testing with Best Model...")
         
         if bestModelPath:
             model.load_state_dict(torch.load(os.path.join(bestModelPath, 'model.ckpt')))
@@ -425,4 +411,21 @@ if __name__ == '__main__':
             print(f"Model saved to: {bestModelPath}")
 
     except Exception as e:
-        print(f"\nAn error occurred: {e}")
+        print(f"\\nAn error occurred: {e}")
+
+if __name__ == '__main__':
+    # 設定參數
+    config = {
+        'seed': 42,
+        'seqLength': 5, # 累積過去 5 場的熱圖
+        'batchSize': 32,
+        'nEpochs': 20,
+        'learningRate': 0.001,
+        'saveDir': 'savedCnnModels',
+        'gamesPath': 'dataset/games.csv',
+        'shotsPath': 'dataset/shots.csv', # 必須有 shots.csv
+        'trainSeasons': [22016, 22017, 22018, 22019, 22020, 22021, 22022],
+        'valSeasons': [22023], 
+        'testSeasons': [22024]
+    }
+    train(config)

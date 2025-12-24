@@ -8,9 +8,12 @@ import json
 import shutil
 from tqdm import tqdm
 import random
+import argparse
 
 # Import local modules
-from multimodalModel import NbaMultimodal, loadAndPreprocessData, createMultimodalSequences, MultimodalDataset
+from multiModel import NbaMultimodal, loadAndPreprocessData, createMultimodalSequences, MultimodalDataset
+from seqModel import train as train_seq
+from graphModel import train as train_cnn
 
 # ==========================================
 # 1. 固定隨機種子 (Set Seed)
@@ -25,32 +28,37 @@ def setSeed(seed):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
-# ==========================================
-# 2. 主程式 (Main)
-# ==========================================
-if __name__ == '__main__':
-    # Configuration
-    config = {
-        'seed': 42,
-        'seqLength': 10,
-        'batchSize': 32,
-        'nEpochs': 20,
-        'learningRate': 1e-3,
-        'cnnEmbedDim': 64,
-        'statEmbedDim': 32,
-        'dModel': 128,
-        'nHead': 4,
-        'numLayers': 3,
-        'dropout': 0.2,
-        'saveDir': 'savedMultimodalModels',
-        'gamesPath': 'dataset/games.csv',
-        'shotsPath': 'dataset/shots.csv',
-        'teamsPath': 'dataset/teams.csv',
-        'trainSeasons': [22016, 22017, 22018, 22019, 22020, 22021, 22022],
-        'valSeasons': [22023],
-        'testSeasons': [22024]
-    }
+def parse_args():
+    parser = argparse.ArgumentParser(description='Train NBA Multimodal Model')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--seqLength', type=int, default=10, help='Sequence length')
+    parser.add_argument('--batchSize', type=int, default=32, help='Batch size')
+    parser.add_argument('--nEpochs', type=int, default=20, help='Number of epochs')
+    parser.add_argument('--learningRate', type=float, default=1e-3, help='Learning rate')
+    parser.add_argument('--cnnEmbedDim', type=int, default=64, help='CNN embedding dimension')
+    parser.add_argument('--statEmbedDim', type=int, default=32, help='Statistical embedding dimension')
+    parser.add_argument('--dModel', type=int, default=128, help='Model dimension (Transformer)')
+    parser.add_argument('--nHead', type=int, default=4, help='Number of heads (Transformer)')
+    parser.add_argument('--numLayers', type=int, default=3, help='Number of layers (Transformer)')
+    parser.add_argument('--dropout', type=float, default=0.2, help='Dropout rate')
+    parser.add_argument('--saveDir', type=str, default='savedMultimodalModels', help='Directory to save models')
+    parser.add_argument('--gamesPath', type=str, default='dataset/games.csv', help='Path to games.csv')
+    parser.add_argument('--shotsPath', type=str, default='dataset/shots.csv', help='Path to shots.csv')
+    parser.add_argument('--teamsPath', type=str, default='dataset/teams.csv', help='Path to teams.csv')
+    parser.add_argument('--trainSeasons', type=int, nargs='+', default=[22016, 22017, 22018, 22019, 22020, 22021, 22022], help='Training seasons')
+    parser.add_argument('--valSeasons', type=int, nargs='+', default=[22023], help='Validation seasons')
+    parser.add_argument('--testSeasons', type=int, nargs='+', default=[22024], help='Testing seasons')
+    
+    # New argument for selecting models
+    parser.add_argument('--models', nargs='+', default=['multi'], choices=['multi', 'seq', 'cnn'], 
+                        help='List of models to train (multi, seq, cnn). Default: multi')
+    
+    return parser.parse_args()
 
+# ==========================================
+# 2. Multimodal Training Function
+# ==========================================
+def train_multi(config):
     setSeed(config['seed'])
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using Device: {device}")
@@ -68,9 +76,6 @@ if __name__ == '__main__':
         print(f"Split: Train={len(trainData)}, Val={len(valData)}, Test={len(testData)}")
 
         # --- Generate Sequences & Pre-compute Images ---
-        # Note: creating sequences involves generating heatmaps which is slow.
-        # We do it once here.
-        
         print("\nGenerating Train Sequences...")
         xImgTrain, xStatTrain, yTrain = createMultimodalSequences(trainData, shotsGrouped, config['seqLength'], featureCols, targetCols)
         
@@ -89,7 +94,6 @@ if __name__ == '__main__':
         scalerY = MinMaxScaler(feature_range=(0, 1))
 
         # Scale Features
-        # xStatTrain: (N, Seq, Feat) -> Reshape -> Scale -> Reshape
         N, S, F = xStatTrain.shape
         xStatTrainScaled = scalerX.fit_transform(xStatTrain.reshape(-1, F)).reshape(N, S, F)
         xStatValScaled = scalerX.transform(xStatVal.reshape(-1, F)).reshape(xStatVal.shape)
@@ -128,7 +132,7 @@ if __name__ == '__main__':
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['nEpochs'], eta_min=1e-6)
 
         # --- Training Loop ---
-        print("\nStep 3: Start Training...")
+        print("\nStep 3: Start Training (Multimodal)...")
         bestLoss = float('inf')
         bestModelPath = ""
         
@@ -223,3 +227,50 @@ if __name__ == '__main__':
 
     except Exception as e:
         print(f"An error occurred: {e}")
+
+# ==========================================
+# 3. Main Entry Point
+# ==========================================
+if __name__ == '__main__':
+    args = parse_args()
+
+    # Configuration
+    config = {
+        'seed': args.seed,
+        'seqLength': args.seqLength,
+        'batchSize': args.batchSize,
+        'nEpochs': args.nEpochs,
+        'learningRate': args.learningRate,
+        'cnnEmbedDim': args.cnnEmbedDim,
+        'statEmbedDim': args.statEmbedDim,
+        'dModel': args.dModel,
+        'nHead': args.nHead,
+        'numLayers': args.numLayers,
+        'dropout': args.dropout,
+        'saveDir': args.saveDir,
+        'gamesPath': args.gamesPath,
+        'shotsPath': args.shotsPath,
+        'teamsPath': args.teamsPath,
+        'trainSeasons': args.trainSeasons,
+        'valSeasons': args.valSeasons,
+        'testSeasons': args.testSeasons,
+        'models': args.models
+    }
+
+    print(f"Selected Models: {config['models']}")
+    
+    for model_name in config['models']:
+        print(f"\n{'='*40}")
+        print(f"Running Training for: {model_name.upper()}")
+        print(f"{'='*40}")
+        
+        if model_name == 'multi':
+            train_multi(config)
+        elif model_name == 'seq':
+            # Note: seqModel might expect 'datasetPath' mapping, but I handled it in seqModel.py
+            # to default to 'gamesPath' if 'datasetPath' is missing.
+            train_seq(config)
+        elif model_name == 'cnn':
+            train_cnn(config)
+        else:
+            print(f"Unknown model type: {model_name}")

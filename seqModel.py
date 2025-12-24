@@ -196,34 +196,17 @@ class NbaTransformer(nn.Module):
 # ==========================================
 # 5. 主程式 (Main Execution)
 # ==========================================
-if __name__ == '__main__':
-    # 設定參數
-    config = {
-        'seed': 42,
-        'seqLength': 10,
-        'batchSize': 32,
-        'nEpochs': 20,
-        'learningRate': 0.001,
-        'dModel': 64,
-        'nHead': 4,
-        'numLayers': 3,
-        'dropout': 0.1,
-        'saveDir': 'savedSeqModels', # Changed from savePath to saveDir
-        'datasetPath': 'dataset/games.csv',
-        # 定義賽季切分
-        'trainSeasons': [22016, 22017, 22018, 22019, 22020, 22021, 22022],
-        'valSeasons': [22023], 
-        'testSeasons': [22024]
-    }
-
+def train(config):
     # 1. 初始化
     setSeed(config['seed'])
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using Device: {device}")
+    
+    datasetPath = config.get('datasetPath', config.get('gamesPath'))
 
     # 2. 資料處理
     try:
-        gamesData, featureCols, targetCols = loadAndPreprocessData(config['datasetPath'], config['seqLength'])
+        gamesData, featureCols, targetCols = loadAndPreprocessData(datasetPath, config['seqLength'])
         
         # 依照賽季 ID 切分 DataFrame
         trainData = gamesData[gamesData['SEASON_ID'].isin(config['trainSeasons'])].copy()
@@ -236,7 +219,7 @@ if __name__ == '__main__':
         print(f"  Test Seasons:  {config['testSeasons']} | Records: {len(testData)}")
 
         # 分別產生序列
-        print("\nCreating Sequences for Training Set...")
+        print("\\nCreating Sequences for Training Set...")
         xTrain, yTrain = createSequences(trainData, config['seqLength'], featureCols, targetCols)
         
         print("Creating Sequences for Validation Set...")
@@ -245,7 +228,7 @@ if __name__ == '__main__':
         print("Creating Sequences for Test Set...")
         xTest, yTest = createSequences(testData, config['seqLength'], featureCols, targetCols)
 
-        print(f"\nSequence Shapes:")
+        print(f"\\nSequence Shapes:")
         print(f"  Train: x={xTrain.shape}, y={yTrain.shape}")
         print(f"  Val:   x={xVal.shape}, y={yVal.shape}")
         print(f"  Test:  x={xTest.shape}, y={yTest.shape}")
@@ -295,7 +278,7 @@ if __name__ == '__main__':
             nHead=config['nHead'],
             numLayers=config['numLayers'],
             outputDim=len(targetCols),
-            dropout=config['dropout']
+            dropout=config.get('dropout', 0.1)
         ).to(device)
 
         criterion = nn.MSELoss()
@@ -374,16 +357,17 @@ if __name__ == '__main__':
                 bestLoss = valMeanLoss
                 
                 # Define Run Name (Used as Folder Name)
-                runName = f"best_run_ep{config['nEpochs']}_seq{config['seqLength']}_d{config['dModel']}_head{config['nHead']}_lr{config['learningRate']}_bs{config['batchSize']}"
+                runName = f"best_seq_ep{config['nEpochs']}_seq{config['seqLength']}_d{config['dModel']}_head{config['nHead']}_lr{config['learningRate']}_bs{config['batchSize']}"
                 runPath = os.path.join(config['saveDir'], runName)
                 
                 # Cleanup previous best model folder if it exists and is different
                 if bestModelPath and os.path.exists(bestModelPath) and bestModelPath != runPath:
                     try:
                         shutil.rmtree(bestModelPath)
-                        print(f"  >>> Removed previous best run: {bestModelPath}")
+                        # print(f"  >>> Removed previous best run: {bestModelPath}")
                     except OSError as e:
-                        print(f"  >>> Error removing previous run: {e}")
+                        pass
+                        # print(f"  >>> Error removing previous run: {e}")
 
                 # Create new run folder
                 os.makedirs(runPath, exist_ok=True)
@@ -408,7 +392,7 @@ if __name__ == '__main__':
                 print(f"  >>> New Best Model & Config Saved to: {runPath}")
         
         # --- Testing Phase ---
-        print("\nStep 4: Start Testing with Best Model...")
+        print("\\nStep 4: Start Testing with Best Model...")
         
         if bestModelPath:
             # Load best model
@@ -443,7 +427,7 @@ if __name__ == '__main__':
                 testRmseOriginal = np.sqrt(testMseOriginal)
             else:
                 testRmseOriginal = np.zeros(len(targetCols))
-            print(f"\nTraining Complete. Best Validation Loss: {bestLoss:.4f}")
+            print(f"\\nTraining Complete. Best Validation Loss: {bestLoss:.4f}")
             print(f"Test Loss (MSE): {testMeanLoss:.4f}")
             print(f"Test RMSE (Original): {', '.join([f'{col}={val:.4f}' for col, val in zip(targetCols, testRmseOriginal)])}")
             print(f"Model saved to: {bestModelPath}")
@@ -467,4 +451,27 @@ if __name__ == '__main__':
             print("No model was saved during training.")
 
     except Exception as e:
-        print(f"\nAn error occurred: {e}")
+        print(f"\\nAn error occurred: {e}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == '__main__':
+    # 設定參數
+    config = {
+        'seed': 42,
+        'seqLength': 10,
+        'batchSize': 32,
+        'nEpochs': 20,
+        'learningRate': 0.001,
+        'dModel': 64,
+        'nHead': 4,
+        'numLayers': 3,
+        'dropout': 0.1,
+        'saveDir': 'savedSeqModels',
+        'datasetPath': 'dataset/games.csv',
+        # 定義賽季切分
+        'trainSeasons': [22016, 22017, 22018, 22019, 22020, 22021, 22022],
+        'valSeasons': [22023], 
+        'testSeasons': [22024]
+    }
+    train(config)
