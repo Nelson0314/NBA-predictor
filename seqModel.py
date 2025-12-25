@@ -60,10 +60,9 @@ def loadAndPreprocessData(filePath, seqLength=10):
     gamesData = gamesData.dropna(subset=allCols)
 
     # 時間排序
-    try:
-        gamesData['GAME_DATE'] = pd.to_datetime(gamesData['GAME_DATE'])
-    except: 
-        pass
+    # 時間排序
+    gamesData['GAME_DATE'] = pd.to_datetime(gamesData['GAME_DATE'], errors='coerce')
+    gamesData = gamesData.dropna(subset=['GAME_DATE'])
     gamesData = gamesData.sort_values(by=['Player_ID', 'GAME_DATE']).reset_index(drop=True)
 
     print(f"Data Loaded. Total Records: {len(gamesData)}")

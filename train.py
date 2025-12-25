@@ -34,14 +34,14 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train NBA Multimodal Model')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--seqLength', type=int, default=10, help='Sequence length')
-    parser.add_argument('--batchSize', type=int, default=32, help='Batch size')
+    parser.add_argument('--batchSize', type=int, default=64, help='Batch size')
     parser.add_argument('--nEpochs', type=int, default=20, help='Number of epochs')
-    parser.add_argument('--learningRate', type=float, default=5e-4, help='Learning rate')
+    parser.add_argument('--learningRate', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--cnnEmbedDim', type=int, default=64, help='CNN embedding dimension')
     parser.add_argument('--statEmbedDim', type=int, default=128, help='Statistical embedding dimension')
-    parser.add_argument('--dModel', type=int, default=128, help='Model dimension (Transformer)')
+    parser.add_argument('--dModel', type=int, default=64, help='Model dimension (Transformer)')
     parser.add_argument('--nHead', type=int, default=8, help='Number of heads (Transformer)')
-    parser.add_argument('--numLayers', type=int, default=4, help='Number of layers (Transformer)')
+    parser.add_argument('--numLayers', type=int, default=3, help='Number of layers (Transformer)')
     parser.add_argument('--dropout', type=float, default=0.3, help='Dropout rate')
     parser.add_argument('--saveDir', type=str, default='savedModels', help='Directory to save models')
     parser.add_argument('--gamesPath', type=str, default='dataset/games.csv', help='Path to games.csv')
@@ -141,7 +141,7 @@ def train_multi(config):
         ).to(device)
 
         criterion = nn.MSELoss()
-        optimizer = torch.optim.AdamW(model.parameters(), lr=config['learningRate'], weight_decay=1e-5)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=config['learningRate'], weight_decay=1e-4)
         # Cosine Annealing Scheduler: T_max corresponds to total epochs
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['nEpochs'], eta_min=1e-6)
 

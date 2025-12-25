@@ -7,16 +7,27 @@ from scipy.ndimage import gaussian_filter
 import os
 from tqdm import tqdm
 import gc
+import concurrent.futures
+
+def load_single_heatmap(args):
+    """Parallel helper function to load a single heatmap"""
+    fpath, key = args
+    try:
+        # Load and cast to float32 to save RAM
+        data = np.load(fpath).astype(np.float32)
+        return (key, data)
+    except:
+        return None
 
 # ==========================================
 # 1. 輔助函式 (Helper Functions)
 # ==========================================
 def preloadHeatmaps(heatmapDir):
     """
-    將所有熱力圖預先載入記憶體，解決 IO 瓶頸。
+    Load all heatmaps into RAM using Parallel Processing.
     Returns: dict { 'playerID_gameID': np.array }
     """
-    print(f"Pre-loading heatmaps from {heatmapDir} into RAM...")
+    print(f"Pre-loading heatmaps from {heatmapDir} into RAM (Parallel)...")
     cache = {}
     
     if not os.path.exists(heatmapDir):
@@ -25,16 +36,23 @@ def preloadHeatmaps(heatmapDir):
 
     files = [f for f in os.listdir(heatmapDir) if f.endswith('.npy')]
     
-    # 使用 tqdm 顯示進度
-    for f in tqdm(files, desc="Loading .npy files"):
-        # filename format: "playerID_gameID.npy"
-        key = f.replace('.npy', '') 
+    # Prepare tasks: (file_path, key_name)
+    tasks = []
+    for f in files:
+        key = f.replace('.npy', '')
         path = os.path.join(heatmapDir, f)
-        try:
-            # 讀取並轉為 float32 以節省記憶體 (預設是 float64)
-            cache[key] = np.load(path).astype(np.float32)
-        except:
-            pass
+        tasks.append((path, key))
+        
+    # Parallel Load (I/O Bound -> Use Threads)
+    # Using 16 workers usually saturates I/O nicely without blocking Python GIL too much
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+        futures = {executor.submit(load_single_heatmap, t): t for t in tasks}
+        
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(files), desc="Loading .npy files"):
+            res = future.result()
+            if res:
+                k, data = res
+                cache[k] = data
             
     print(f"Loaded {len(cache)} heatmaps into RAM.")
     return cache
@@ -67,7 +85,7 @@ def loadAndPreprocessData(gamesPath, shotsPath, teamsPath, seqLength=10):
     targetCols = ['PTS', 'AST', 'REB']
     
     # Clean Games
-    gamesData['GAME_DATE'] = pd.to_datetime(gamesData['GAME_DATE'], format='mixed')
+    gamesData['GAME_DATE'] = pd.to_datetime(gamesData['GAME_DATE'], errors='coerce')
     allCols = list(set(featureCols + targetCols))
     for col in allCols:
         if col in gamesData.columns:
