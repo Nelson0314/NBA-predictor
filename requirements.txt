@@ -1,11 +1,18 @@
-requests
-pandas
-nba_api
-seaborn
-xgboost
-numpy
-matplotlib
-scipy
-scikit-learn
+# Core
 torch
+pandas
+numpy
+
+# Machine Learning
+scikit-learn
+xgboost
+scipy
+
+# Visualization
+matplotlib
+seaborn
+
+# Data & Utilities
 tqdm
+nba_api
+requests

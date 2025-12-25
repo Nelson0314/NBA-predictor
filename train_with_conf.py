@@ -498,7 +498,13 @@ def train_and_simulate():
     # Simulation
     N_test = len(yTest)
     # Loop over all predicted targets: PTS(0), AST(1), REB(2)
+    # Loop over all predicted targets: PTS(0), AST(1), REB(2)
     target_names = ['PTS', 'AST', 'REB']
+    
+    # Define Maximum "Zero Confidence" Spreads (The spread at which we say confidence is 0%)
+    MAX_SPREADS = {'PTS': 30.0, 'AST': 10.0, 'REB': 12.0}
+    # Universal Minimum Confidence Threshold (%)
+    CONF_THRESH_PERCENT = 40.0 
     
     for i in range(N_test):
         # Check DNP (Did Not Play)
@@ -528,8 +534,12 @@ def train_and_simulate():
             g_spread = g_p90 - g_p10
             g_std = g_spread / 2.56 if g_spread > 0 else 1.0
             
-            # 3. Decision
+            # 3. Decision & Confidence Metric
             actual = yTest[i, target_idx]
+            
+            # Convert Spread to Confidence % (0-100)
+            max_spread = MAX_SPREADS.get(t_name, 20.0)
+            conf_percent = max(0.0, 100.0 * (1.0 - (g_spread / max_spread)))
             
             # My Prob Over
             g_z = (line - g_p50) / g_std
@@ -546,16 +556,11 @@ def train_and_simulate():
             bet_odds = 0.0
             status = "SKIPPED"
             
-            # Strategy: High Conf (Spread threshold based on target) + Positive EV
-            # Adjust thresholds: PTS<15, AST<5, REB<6
-            spread_thresh = 15.0
-            if t_name == 'AST': spread_thresh = 5.0
-            if t_name == 'REB': spread_thresh = 6.0
-            
             # Reasons tracking
             reason = ""
 
-            if g_spread < spread_thresh:
+            # Strategy: Conf% > Threshold + Positive EV
+            if conf_percent >= CONF_THRESH_PERCENT:
                 if ev_over > 0.05:
                     bet_type = "OVER"
                     bet_odds = odds_over
@@ -570,7 +575,7 @@ def train_and_simulate():
                     reason = "EV_LOW"
                     status = "SKIPPED_EV"
             else:
-                reason = "SPREAD_WIDE"
+                reason = f"CONF_LOW ({conf_percent:.1f}%)"
                 status = "SKIPPED_CONF"
                     
             outcome = 0
@@ -611,13 +616,14 @@ def train_and_simulate():
                 'Status': status,
                 'Reason': reason,
                 'HousePred': round(h_pred, 1),
-                'Line': line,
+                'BetType': bet_type,
+                'Line': float(line),
                 'Odds': round(bet_odds, 2) if bet_placed else 0,
-                'MyPred': round(g_p50, 1),
-                'MySpread': round(g_spread, 1),
+                'MyPred': float(g_p50),
+                'MySpread': float(g_spread),
+                'Conf%': round(conf_percent, 1),
                 'ConfStd': round(g_std, 2), # Explicit Confidence Metric
                 'MyEV': round(max(ev_over, ev_under), 2),
-                'Bet': bet_type,
                 'Actual': round(actual, 1),
                 'HouseDiff': round(actual - line, 1),
                 'Result': res_str,
