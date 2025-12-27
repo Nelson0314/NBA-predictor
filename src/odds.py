@@ -53,6 +53,56 @@ else:
             else:
                 print(f"獲取賭盤資料失敗，狀態碼: {event_odds_response.status_code}")
                 print(event_odds_response.text)  # 打印錯誤信息
+            # 使用game_id獲取賭盤資料
+            event_odds_url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/events/{game_id}/odds?apiKey={api_key}&regions=us&bookmakers=fanduel&markets=player_points_rebounds_assists"
+            event_odds_response = requests.get(event_odds_url)
+
+            if event_odds_response.status_code == 200:
+                event_odds_data = event_odds_response.json()
+                all_event_odds.append(event_odds_data)  # 存儲賭盤資料
+            else:
+                print(f"獲取賭盤資料失敗，狀態碼: {event_odds_response.status_code}")
+                print(event_odds_response.text)  # 打印錯誤信息
+            # 使用game_id獲取賭盤資料
+            event_odds_url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/events/{game_id}/odds?apiKey={api_key}&regions=us&bookmakers=fanduel&markets=player_points_rebounds_assists"
+            event_odds_response = requests.get(event_odds_url)
+
+            if event_odds_response.status_code == 200:
+                event_odds_data = event_odds_response.json()
+                all_event_odds.append(event_odds_data)  # 存儲賭盤資料
+            else:
+                print(f"獲取賭盤資料失敗，狀態碼: {event_odds_response.status_code}")
+                print(event_odds_response.text)  # 打印錯誤信息
+            # 使用game_id獲取賭盤資料
+            event_odds_url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/events/{game_id}/odds?apiKey={api_key}&regions=us&bookmakers=fanduel&markets=player_points_rebounds"
+            event_odds_response = requests.get(event_odds_url)
+
+            if event_odds_response.status_code == 200:
+                event_odds_data = event_odds_response.json()
+                all_event_odds.append(event_odds_data)  # 存儲賭盤資料
+            else:
+                print(f"獲取賭盤資料失敗，狀態碼: {event_odds_response.status_code}")
+                print(event_odds_response.text)  # 打印錯誤信息
+            # 使用game_id獲取賭盤資料
+            event_odds_url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/events/{game_id}/odds?apiKey={api_key}&regions=us&bookmakers=fanduel&markets=player_points_assists"
+            event_odds_response = requests.get(event_odds_url)
+
+            if event_odds_response.status_code == 200:
+                event_odds_data = event_odds_response.json()
+                all_event_odds.append(event_odds_data)  # 存儲賭盤資料
+            else:
+                print(f"獲取賭盤資料失敗，狀態碼: {event_odds_response.status_code}")
+                print(event_odds_response.text)  # 打印錯誤信息
+            # 使用game_id獲取賭盤資料
+            event_odds_url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/events/{game_id}/odds?apiKey={api_key}&regions=us&bookmakers=fanduel&markets=player_rebounds_assists"
+            event_odds_response = requests.get(event_odds_url)
+
+            if event_odds_response.status_code == 200:
+                event_odds_data = event_odds_response.json()
+                all_event_odds.append(event_odds_data)  # 存儲賭盤資料
+            else:
+                print(f"獲取賭盤資料失敗，狀態碼: {event_odds_response.status_code}")
+                print(event_odds_response.text)  # 打印錯誤信息
         
         # 將所有賭盤資料存儲到JSON文件
         with open('event_odds_data.json', 'w', encoding='utf-8') as f:

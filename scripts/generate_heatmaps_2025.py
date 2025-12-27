@@ -63,8 +63,10 @@ def main():
         filename = f"{pid_str}_{gid_str}.npy"
         filepath = os.path.join(HEATMAP_DIR, filename)
         
-        # Optimization: If shots didn't change, maybe skip? 
-        # But we want to ensure coverage.
+        if os.path.exists(filepath):
+            # print(f"Skipping {filename} (Exists)")
+            skip_count += 1
+            continue
         
         try:
             # Get shots for this specific game & player
