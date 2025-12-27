@@ -8,7 +8,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import shutil
 import re
 from importlib import reload
-import train_with_conf 
+import train 
 from src.config import DATA_DIR 
 
 # ==========================================
@@ -67,12 +67,12 @@ for i, exp in enumerate(experiments):
     if not os.path.exists(save_path):
         os.makedirs(save_path)
         
-    run_args = ["train_with_conf.py"] + COMMON_ARGS + ["--saveDir", save_path] + exp["params"]
+    run_args = ["train.py"] + COMMON_ARGS + ["--saveDir", save_path] + exp["params"]
     sys.argv = run_args
     
     try:
-        reload(train_with_conf)
-        train_with_conf.train_and_simulate()
+        reload(train)
+        train.main()
         
         report_path = os.path.join(save_path, "simulation_report.txt")
         roi = -999.0
