@@ -1,4 +1,12 @@
-__pycache__
-dataset/heatmaps
-savedModels
-savedModels_conf
+__pycache__/
+*.pyc
+.ipynb_checkpoints
+dataset/heatmaps/
+dataset/live_2025/heatmaps/
+savedModels/
+savedModels_conf/
+savedModels_grid/
+bets_*.csv
+predictions_*.csv
+event_odds_data.json
+*.npy
