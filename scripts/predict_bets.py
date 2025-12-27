@@ -28,12 +28,15 @@ DATASET_DIR_OLD = DATA_DIR
 DATASET_DIR_NEW = os.path.join(DATA_DIR, "live_2025")
 ODDS_FILE = os.path.join(os.path.dirname(__file__), "..", "event_odds_data.json")
 OUTPUT_FILE = os.path.join(os.path.dirname(__file__), "..", "bets.csv")
-SEQ_LENGTH = 5
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # Load Config
 with open(os.path.join(MODEL_PATH, 'config.json'), 'r') as f:
     CONFIG = json.load(f)
+
+# Set dynamic SEQ_LENGTH
+SEQ_LENGTH = CONFIG.get('seqLength', 5)
+print(f"Using SEQ_LENGTH: {SEQ_LENGTH}")
 
 # Feature Cols (Must match training)
 # We need to replicate the 'train_house_models' feature extraction just to get the list of columns and the scaler.
