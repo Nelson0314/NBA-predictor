@@ -180,7 +180,6 @@ def train_multimodal_quantile(config):
     xPlayerTrain, xGameTrain, xStatTrain, yTrain = createMultimodalSequences(trainData, shotsGrouped, config['seqLength'], featureCols, targetCols)
     xPlayerVal, xGameVal, xStatVal, yVal = createMultimodalSequences(valData, shotsGrouped, config['seqLength'], featureCols, targetCols)
     xPlayerTest, xGameTest, xStatTest, yTest = createMultimodalSequences(testData, shotsGrouped, config['seqLength'], featureCols, targetCols)
-    metaTest = xPlayerTest # Alias for Simulation
 
     # Preload Heatmaps
     heatmapCache = preloadHeatmaps(config['heatmapDir'])
@@ -278,7 +277,7 @@ def train_multimodal_quantile(config):
     criterion = QuantileLoss(quantiles=[0.1, 0.5, 0.9])
     optimizer = torch.optim.AdamW(model.parameters(), lr=config['learningRate'], weight_decay=config['weightDecay'])
     
-    print("\nStarting Training...")
+    print("\nStarting Quantile Training...")
     bestLoss = float('inf')
     bestModelPath = ""
     

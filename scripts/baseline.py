@@ -1,152 +1,172 @@
 
-import pandas as pd
-import numpy as np
-import sys
 import os
+import torch
+from torch.utils.data import DataLoader
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+import sys
 from sklearn.linear_model import LinearRegression
-from xgboost import XGBRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+from xgboost import XGBRegressor
+from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
-# Add root to sys.path
+# Add root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from src.config import DATA_DIR, SAVED_MODELS_DIR, HEATMAP_DIR
+from src.multiModel import loadAndPreprocessData, createMultimodalSequences, preloadHeatmaps, MultimodalDataset
 
-from src.seqModel import loadAndPreprocessData, createSequences
+# Config
+SEQ_LENGTH = 7
+BATCH_SIZE = 64
+TRAIN_SEASONS = [22016, 22017, 22018, 22019, 22020, 22021, 22022]
+TEST_SEASONS = [22024]
+TARGET_COLS = ['PTS', 'AST', 'REB']
 
-def train_baselines(seqLength=5):
-    print(f"==================================================")
-    print(f"Running Baselines (SeqLength={seqLength})")
-    print(f"==================================================")
+def get_sequences_and_features():
+    print("Loading Data...")
+    gamesPath = os.path.join(DATA_DIR, 'games.csv')
+    shotsPath = os.path.join(DATA_DIR, 'shots.csv')
+    teamsPath = os.path.join(DATA_DIR, 'teams.csv')
     
-    # 1. Load Data
-    datasetPath = 'dataset/games.csv'
-    gamesData, featureCols, targetCols = loadAndPreprocessData(datasetPath, seqLength)
+    gamesData, _, featureCols, _ = loadAndPreprocessData(gamesPath, shotsPath, teamsPath, SEQ_LENGTH)
+    heatmapCache = preloadHeatmaps(HEATMAP_DIR)
     
-    # 2. Split Data (Same as train.py default)
-    trainSeasons = [22016, 22017, 22018, 22019, 22020, 22021, 22022]
-    valSeasons = [22023] 
-    testSeasons = [22024]
+    trainData = gamesData[gamesData['SEASON_ID'].isin(TRAIN_SEASONS)]
+    testData = gamesData[gamesData['SEASON_ID'].isin(TEST_SEASONS)]
     
-    trainData = gamesData[gamesData['SEASON_ID'].isin(trainSeasons)].copy()
-    testData = gamesData[gamesData['SEASON_ID'].isin(testSeasons)].copy() # We focus on Test for final report
+    print("Generating Sequences...")
+    pTrain, gTrain, xTrain, yTrain = createMultimodalSequences(trainData, None, SEQ_LENGTH, featureCols, TARGET_COLS)
+    pTest, gTest, xTest, yTest = createMultimodalSequences(testData, None, SEQ_LENGTH, featureCols, TARGET_COLS)
     
-    print(f"Train Records: {len(trainData)}")
-    print(f"Test Records:  {len(testData)}")
+    # Create DataLoaders for Batch Processing (Heatmap aggregation)
+    trainDataset = MultimodalDataset(pTrain, gTrain, xTrain, heatmapCache, yTrain)
+    testDataset = MultimodalDataset(pTest, gTest, xTest, heatmapCache, yTest)
     
-    # 3. Create Sequences
-    print("Creating Sequences...")
-    # createSequences returns x, y, meta. We only need x, y for baselines.
-    xTrain, yTrain, _ = createSequences(trainData, seqLength, featureCols, targetCols)
-    xTest, yTest, _ = createSequences(testData, seqLength, featureCols, targetCols)
+    trainLoader = DataLoader(trainDataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    testLoader = DataLoader(testDataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+
+    # Helper to extract features
+    def extract(loader):
+        vis_list, stat_list, y_list = [], [], []
+        with torch.no_grad():
+            for imgs, stats, targets in tqdm(loader, desc="Extracting"):
+                # Vis: Average Pooling -> Flatten
+                avgImg = torch.mean(imgs, dim=1) # (B, 2, 50, 50)
+                flat_vis = avgImg.numpy().reshape(avgImg.shape[0], -1) 
+                
+                # Stats: Flatten
+                flat_stat = stats.view(stats.shape[0], -1).numpy()
+                
+                vis_list.append(flat_vis)
+                stat_list.append(flat_stat)
+                y_list.append(targets.numpy())
+        return np.vstack(vis_list), np.vstack(stat_list), np.vstack(y_list)
+
+    print("Extracting Train Features...")
+    X_train_vis_raw, X_train_stat, y_train = extract(trainLoader)
+    print("Extracting Test Features...")
+    X_test_vis_raw, X_test_stat, y_test = extract(testLoader)
     
-    # 4. Flatten for Traditional Models (N, Seq, Feat) -> (N, Seq*Feat)
-    N_tr, S_tr, F_tr = xTrain.shape
-    xTrainFlat = xTrain.reshape(N_tr, -1)
+    return X_train_vis_raw, X_train_stat, y_train, X_test_vis_raw, X_test_stat, y_test
+
+def train_and_evaluate():
+    # 1. Get Data
+    X_train_vis_raw, X_train_stat, y_train, X_test_vis_raw, X_test_stat, y_test = get_sequences_and_features()
+
+    # 2. PCA for Visual Features
+    print("Fitting PCA on Visual Features...")
+    scaler_vis = StandardScaler()
+    X_train_vis_scaled = scaler_vis.fit_transform(X_train_vis_raw)
+    X_test_vis_scaled = scaler_vis.transform(X_test_vis_raw)
     
-    N_te, S_te, F_te = xTest.shape
-    xTestFlat = xTest.reshape(N_te, -1)
+    pca = PCA(n_components=50) # Reduce 5000 -> 50
+    X_train_vis_pca = pca.fit_transform(X_train_vis_scaled)
+    X_test_vis_pca = pca.transform(X_test_vis_scaled)
+    print(f"PCA Explained Variance: {np.sum(pca.explained_variance_ratio_):.4f}")
+
+    # 3. Define Model Configs
+    # Name -> {FeatureSet, ModelClass}
+    # FeatureSet: 'NO_CNN' (Stats only), 'WITH_CNN' (Stats + PCA Heatmaps)
     
-    # 5. Scaling (Linear Regression benefits from scaling)
-    # User requested defaults, so maybe raw data? 
-    # But LR really needs scaling for convergence if SGD, but sklearn use OLS (SVD) so scaling is less critical for solution but good practice.
-    # However, to "weaken" it or make it "default", removing scaling is a valid "un-tuning".
-    # Let's use raw data for defaults.
+    X_train_no_cnn = X_train_stat
+    X_test_no_cnn = X_test_stat
     
-    # scalerX = StandardScaler()
-    # xTrainFlatScaled = scalerX.fit_transform(xTrainFlat)
-    # xTestFlatScaled = scalerX.transform(xTestFlat)
+    X_train_with_cnn = np.hstack([X_train_stat, X_train_vis_pca])
+    X_test_with_cnn = np.hstack([X_test_stat, X_test_vis_pca])
     
-    # Targets usually don't need scaling for these baselines unless we want to, 
-    # but to match train.py raw output interpretation, we'll keep targets raw.
+    configs = [
+        ("Naive (Mean)", "NAIVE", None),
+        ("Linear Regression (No CNN)", "NO_CNN", LinearRegression()),
+        ("XGBoost (No CNN)", "NO_CNN", XGBRegressor(n_estimators=100, max_depth=5, learning_rate=0.1, n_jobs=-1)),
+        ("Linear Regression (With CNN)", "WITH_CNN", LinearRegression()),
+        ("XGBoost (With CNN)", "WITH_CNN", XGBRegressor(n_estimators=100, max_depth=5, learning_rate=0.1, n_jobs=-1))
+    ]
+
+    print("\n" + "="*100)
+    print(f"{'Model':<30} | {'PTS MAE':<10} | {'AST MAE':<10} | {'REB MAE':<10} | {'AVG MAE':<10} | {'AVG STD':<10}")
+    print("-" * 100)
     
-    # ==========================================
-    # 6. Train & Evaluate Models
-    # ==========================================
-    
-    results = {}
-    
-    # --- Naive (Window Mean) ---
-    print("\n1. Naive (Window Mean)...")
-    naive_preds = np.zeros_like(yTest)
-    for i, tgt in enumerate(targetCols):
-        if tgt in featureCols:
-            idx = featureCols.index(tgt)
-            # Mean over sequence dimension
-            naive_preds[:, i] = np.mean(xTest[:, :, idx], axis=1)
+    report_lines = []
+    report_lines.append("="*100)
+    report_lines.append(f"{'Model':<30} | {'PTS MAE':<10} | {'AST MAE':<10} | {'REB MAE':<10} | {'AVG MAE':<10} | {'AVG STD':<10}")
+    report_lines.append("-" * 100)
+
+    for name, feat_type, model in configs:
+        preds = np.zeros_like(y_test)
+        
+        if feat_type == "NAIVE":
+            # Just predict mean of training set per target
+            train_means = np.mean(y_train, axis=0)
+            preds = np.tile(train_means, (len(y_test), 1))
+            
         else:
-            # Fallback to global train mean if target not in features (unlikely for auto-regressive)
-            naive_preds[:, i] = np.mean(yTrain[:, i])
+            # Select Features
+            X_tr = X_train_no_cnn if feat_type == "NO_CNN" else X_train_with_cnn
+            X_te = X_test_no_cnn if feat_type == "NO_CNN" else X_test_with_cnn
             
-    results['Naive'] = {
-        'MAE': mean_absolute_error(yTest, naive_preds),
-        'MSE': mean_squared_error(yTest, naive_preds)
-    }
-
-    # --- Linear Regression (Default) ---
-    print("2. Linear Regression (Default)...")
-    lr = LinearRegression()
-    lr.fit(xTrainFlat, yTrain) # Train on raw
-    lr_preds = lr.predict(xTestFlat)
-    
-    results['LinearRegression'] = {
-        'MAE': mean_absolute_error(yTest, lr_preds),
-        'MSE': mean_squared_error(yTest, lr_preds)
-    }
-    
-    # --- XGBoost (Default) ---
-    print("3. XGBoost (Default)...")
-    # Using params from train.py house_xgb
-    xgb = XGBRegressor(n_jobs=-1, random_state=42) # Pure defaults
-    
-    try:
-        xgb.fit(xTrainFlat, yTrain)
-        xgb_preds = xgb.predict(xTestFlat)
-    except Exception as e:
-        print(f"XGBoost fit failed: {e}. Trying MultiOutputRegressor...")
-        from sklearn.multioutput import MultiOutputRegressor
-        xgb = MultiOutputRegressor(XGBRegressor(n_jobs=-1, random_state=42))
-        xgb.fit(xTrainFlat, yTrain)
-        xgb_preds = xgb.predict(xTestFlat)
-
-    results['XGBoost'] = {
-        'MAE': mean_absolute_error(yTest, xgb_preds),
-        'MSE': mean_squared_error(yTest, xgb_preds)
-    }
-    
-    # ==========================================
-    # 7. Report Per Target
-    # ==========================================
-    print("\n" + "="*80)
-    print(f"BASELINE REPORT (Test Set 2024-25, Seq={seqLength})")
-    print("="*80)
-    print(f"{'Model':<12} | {'Metric':<6} | {'PTS':<10} | {'AST':<10} | {'REB':<10}")
-    print("-" * 80)
-    
-    models_preds = {
-        'Naive': naive_preds,
-        'Linear': lr_preds,
-        'XGBoost': xgb_preds
-    }
-    
-    for model_name, preds in models_preds.items():
-        # Calculate MAE & Std for each target
-        maes = []
-        stds = []
+            # Train & Predict per target (MultiOutput)
+            # Scikit Learn LinearRegression supports multi-output natively
+            # XGBoost needs MultiOutputRegressor OR loop.
+            if isinstance(model, LinearRegression):
+                model.fit(X_tr, y_train)
+                preds = model.predict(X_te)
+            else:
+                # XGBoost Loop
+                for i in range(3):
+                    model.fit(X_tr, y_train[:, i])
+                    preds[:, i] = model.predict(X_te)
         
-        for i, tgt in enumerate(targetCols):
-            errors = yTest[:, i] - preds[:, i]
-            abs_errors = np.abs(errors)
+        # Calculate Metrics
+        try:
+            maes = []
+            stds = []
+            for i in range(3):
+                loss = np.abs(y_test[:, i] - preds[:, i])
+                maes.append(np.mean(loss))
+                stds.append(np.std(loss))
+                
+            avg_mae = np.mean(maes)
+            avg_std = np.mean(stds)
             
-            maes.append(np.mean(abs_errors))
-            stds.append(np.std(errors))
+            line = f"{name:<30} | {maes[0]:<10.4f} | {maes[1]:<10.4f} | {maes[2]:<10.4f} | {avg_mae:<10.4f} | {avg_std:<10.4f}"
+            print(line)
+            sys.stdout.flush() # Force print
+            report_lines.append(line)
             
-        # Print MAE Row
-        print(f"{model_name:<12} | {'MAE':<6} | {maes[0]:<10.4f} | {maes[1]:<10.4f} | {maes[2]:<10.4f}")
-        # Print Std Row
-        print(f"{'':<12} | {'StdErr':<6} | {stds[0]:<10.4f} | {stds[1]:<10.4f} | {stds[2]:<10.4f}")
-        print("-" * 80)
-        
-    print("="*80)
+        except Exception as e:
+            err_msg = f"Error evaluating {name}: {str(e)}"
+            print(err_msg)
+            report_lines.append(err_msg)
+
+    print("="*100)
+    report_lines.append("="*100)
+    
+    # Save Report
+    with open("baseline_report.txt", "w") as f:
+        f.write("\n".join(report_lines))
+    print("Report saved to baseline_report.txt")
 
 if __name__ == "__main__":
-    train_baselines(seqLength=5)
+    train_and_evaluate()
