@@ -504,11 +504,12 @@ def train(config):
                 
                 # Save Config as JSON
                 configPath = os.path.join(runPath, 'config.json')
-                # Add current featureCols to config for inference consistency
                 saveConfig = config.copy()
                 saveConfig['featureCols'] = featureCols
                 saveConfig['valid_loss'] = valMeanLoss
-                saveConfig['valid_mae'] = {col: val for col, val in zip(targetCols, valMaeOriginal)}
+                # Flatten Valid Metrics
+                for col, val in zip(targetCols, valMaeOriginal):
+                    saveConfig[f'valid_mae_{col.lower()}'] = val
                 
                 with open(os.path.join(runPath, 'config.json'), 'w') as f:
                     json.dump(saveConfig, f, indent=4)
@@ -585,6 +586,24 @@ def train(config):
             print("Seq Model Training Completed. Returning predictions for Simulation...")
             
             # metaTest is numpy array of IDs
+            
+            # --- Update Config with Test Metrics ---
+            # Calculate Test Metrics
+            test_maes = []
+            for i in range(len(targetCols)):
+                 test_maes.append(mean_absolute_error(yTest[:, i], predsP50[:, i]))
+            
+            with open(os.path.join(runPath, 'config.json'), 'r') as f:
+                updateConfig = json.load(f)
+            
+            updateConfig['test_loss'] = testMeanLoss
+            for col, val in zip(targetCols, test_maes):
+                updateConfig[f'test_mae_{col.lower()}'] = val
+                
+            with open(os.path.join(runPath, 'config.json'), 'w') as f:
+                json.dump(updateConfig, f, indent=4)
+            print("Updated config with Test Metrics.")
+
             return preds_gambler, house_preds, yTest, metaTest, runPath
 
             # --- Reporting ---

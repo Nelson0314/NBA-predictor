@@ -17,6 +17,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.config import DATA_DIR, SAVED_MODELS_DIR, GAMES_PATH, TEAMS_PATH
 try:
     from src.multiModel import loadAndPreprocessData, createMultimodalSequences, preloadHeatmaps, NbaMultimodal
+    from src.odds import fetch_odds # Import fetch_odds
 except ImportError as e:
     print(f"Error importing src modules: {e}")
     exit()
@@ -227,6 +228,13 @@ class NbaMultimodalQuantile(NbaMultimodal):
 # 3. Predict & Bet
 # ==========================================
 def main():
+    # Fetch Fresh Odds
+    print("Updating Odds Data...")
+    try:
+        fetch_odds()
+    except Exception as e:
+        print(f"Warning: Automatic odds fetch failed ({e}). Using existing file if available.")
+        
     odds_df = parse_odds(ODDS_FILE)
     if odds_df.empty:
         print("No odds found.")
