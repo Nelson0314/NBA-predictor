@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from xgboost import XGBRegressor
 from scipy.stats import norm
 import numpy as np
@@ -13,12 +13,12 @@ import shutil
 from tqdm import tqdm
 import random
 import argparse
-import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import concurrent.futures
 import sys
+import torch.multiprocessing as mp
 
 # Add root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -27,6 +27,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 # Ensure NbaMultimodal is available in multiModel.py
 from src.multiModel import loadAndPreprocessData, createMultimodalSequences, MultimodalDataset, preloadHeatmaps, CnnEncoder, NbaMultimodal
 from src.seqModel import train as train_seq
+from src.odds import calculate_odds
+from src.simulation import run_betting_simulation
 
 # ==========================================
 # 1. Custom Quantile Loss & Model
@@ -118,27 +120,6 @@ def setSeed(seed):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
-def calculate_odds(house_pred, line, std_dev=9.0):
-    """
-    Calculate decimal odds based on the House Prediction vs the Line.
-    Assumes normal distribution with fixed std_dev (approx for NBA player props).
-    """
-    # Z-score for the Line relative to House Prediction
-    # Prob(Score > Line) = 1 - CDF((Line - Pred) / Std)
-    
-    z = (line - house_pred) / std_dev
-    prob_over = 1 - norm.cdf(z)
-    prob_under = 1.0 - prob_over
-    
-    # Avoid infinite odds
-    prob_over = max(0.01, min(0.99, prob_over))
-    prob_under = max(0.01, min(0.99, prob_under))
-    
-    odds_over = 1.0 / prob_over
-    odds_under = 1.0 / prob_under
-    
-    return odds_over, odds_under, prob_over
-
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Quantile Model & Simulate Betting')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
@@ -168,21 +149,6 @@ def parse_args():
 # 3. Simulation & Training
 # ==========================================
 def train_multimodal_quantile(config):
-    # args = parse_args() # REMOVED: Config passed in
-    
-    # Configuration
-    # Config is already a dict, use it directly
-    
-    setSeed(config['seed'])
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Using Device: {device}")
-    
-    # ... (Config usage follows)
-    
-    # --- Data Loading ---
-    # Using config[...] instead of args...
-
-    
     setSeed(config['seed'])
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using Device: {device}")
@@ -194,11 +160,8 @@ def train_multimodal_quantile(config):
     
     # Create Player ID -> Name Mapping
     if 'Player_Name' in gamesData.columns:
-        print("Creating Player Name Mapping...")
-        # Drop duplicates to keep dictionary small
         id_to_name = gamesData[['Player_ID', 'Player_Name']].drop_duplicates(subset='Player_ID').set_index('Player_ID')['Player_Name'].to_dict()
     else:
-        print("Warning: 'Player_Name' column not found. Using IDs.")
         id_to_name = {}
     
     trainData = gamesData[gamesData['SEASON_ID'].isin(config['trainSeasons'])].copy()
@@ -459,13 +422,6 @@ def train_multimodal_quantile(config):
     print("House: Hybrid (LR + XGB + Naive)")
     print("Gambler: NbaMultimodalQuantile (Inherited)")
     
-    bankroll = 10000
-    bet_history = []
-    
-    total_bets = 0
-    wins = 0
-    losses = 0
-    
     # Prediction Integration
     print("Generating House Lines (Strong Ensemble)...")
     preds_lr = house_lr.predict(xTestFlatScaled) # (N, 3)
@@ -492,158 +448,8 @@ def train_multimodal_quantile(config):
     
     # Simulation
     N_test = len(yTest)
-    # Simulation
-    N_test = len(yTest)
-    # Loop over all predicted targets: PTS(0), AST(1), REB(2)
     # Loop over all predicted targets: PTS(0), AST(1), REB(2)
     target_names = ['PTS', 'AST', 'REB']
-    
-    # Define Maximum "Zero Confidence" Spreads (The spread at which we say confidence is 0%)
-    MAX_SPREADS = {'PTS': 30.0, 'AST': 10.0, 'REB': 12.0}
-    # Universal Minimum Confidence Threshold (%)
-    CONF_THRESH_PERCENT = 40.0 
-    
-    for i in range(N_test):
-        # Check DNP (Did Not Play)
-        # MIN is at index 3 of yTest
-        min_played = yTest[i, 3]
-        if min_played <= 0:
-            # DNP -> Push for all bets on this player-game
-            continue 
-            
-        for target_idx, t_name in enumerate(target_names):
-            # 1. House Line & Odds
-            h_pred = house_raw_preds[i, target_idx]
-            line = round(h_pred) + 0.5
-            
-            # Adjust std_dev based on target type for odds calc (approx)
-            # PTS ~ 9.0, AST ~ 3.0, REB ~ 4.0
-            scale_std = 9.0
-            if t_name == 'AST': scale_std = 3.0
-            if t_name == 'REB': scale_std = 4.0
-            
-            odds_over, odds_under, _ = calculate_odds(h_pred, line, std_dev=scale_std)
-            
-            # 2. Gambler Stats
-            g_p10 = preds_gambler[i, target_idx, 0]
-            g_p50 = preds_gambler[i, target_idx, 1]
-            g_p90 = preds_gambler[i, target_idx, 2]
-            g_spread = g_p90 - g_p10
-            g_std = g_spread / 2.56 if g_spread > 0 else 1.0
-            
-            # 3. Decision & Confidence Metric
-            actual = yTest[i, target_idx]
-            
-            # Convert Spread to Confidence % (0-100)
-            max_spread = MAX_SPREADS.get(t_name, 20.0)
-            conf_percent = max(0.0, 100.0 * (1.0 - (g_spread / max_spread)))
-            
-            # My Prob Over
-            g_z = (line - g_p50) / g_std
-            g_prob_over = 1 - norm.cdf(g_z)
-            g_prob_under = 1.0 - g_prob_over
-            
-            # EV
-            ev_over = (g_prob_over * odds_over) - 1
-            ev_under = (g_prob_under * odds_under) - 1
-            
-            bet_size = 100
-            bet_placed = False
-            bet_type = "NONE"
-            bet_odds = 0.0
-            status = "SKIPPED"
-            
-            # Reasons tracking
-            reason = ""
-
-            # Strategy: Conf% > Threshold + Positive EV
-            if conf_percent >= CONF_THRESH_PERCENT:
-                if ev_over > 0.05:
-                    bet_type = "OVER"
-                    bet_odds = odds_over
-                    bet_placed = True
-                    status = "PLACED"
-                elif ev_under > 0.05:
-                    bet_type = "UNDER"
-                    bet_odds = odds_under
-                    bet_placed = True
-                    status = "PLACED"
-                else:
-                    reason = "EV_LOW"
-                    status = "SKIPPED_EV"
-            else:
-                reason = f"CONF_LOW ({conf_percent:.1f}%)"
-                status = "SKIPPED_CONF"
-                    
-            outcome = 0
-            res_str = "NONE"
-            
-            if bet_placed:
-                # Check for DNP again just in case (already handled outer loop, but good for logic)
-                # But here we assume if we are here, he played.
-                
-                if bet_type == "OVER":
-                    if actual > line:
-                        outcome = bet_size * (bet_odds - 1)
-                        wins += 1
-                        res_str = "WIN"
-                    else:
-                        outcome = -bet_size
-                        losses += 1
-                        res_str = "LOSS"
-                else: # UNDER
-                    if actual < line:
-                        outcome = bet_size * (bet_odds - 1)
-                        wins += 1
-                        res_str = "WIN"
-                    else:
-                        outcome = -bet_size
-                        losses += 1
-                        res_str = "LOSS"
-                
-                bankroll += outcome
-                total_bets += 1
-            
-            # Log ALL bets (Placed + Skipped)
-            pid = int(xPlayerTest[i][-1])
-            bet_history.append({
-                'PlayerID': pid,
-                'Player': id_to_name.get(pid, f"ID_{pid}"),
-                'Target': t_name,
-                'Status': status,
-                'Reason': reason,
-                'HousePred': round(h_pred, 1),
-                'BetType': bet_type,
-                'Line': float(line),
-                'Odds': round(bet_odds, 2) if bet_placed else 0,
-                'MyPred': float(g_p50),
-                'MySpread': float(g_spread),
-                'Conf%': round(conf_percent, 1),
-                'ConfStd': round(g_std, 2), # Explicit Confidence Metric
-                'MyEV': round(max(ev_over, ev_under), 2),
-                'Actual': round(actual, 1),
-                'HouseDiff': round(actual - line, 1),
-                'Result': res_str,
-                'PnL': round(outcome, 2)
-            })
-
-    # --- Reporting ---
-    print("\n" + "="*50)
-    print("SIMULATION RESULTS")
-    print("="*50)
-    print(f"Total Bets: {total_bets}")
-    print(f"Wins: {wins} | Losses: {losses}")
-    if total_bets > 0:
-        print(f"Win Rate: {(wins/total_bets)*100:.2f}%")
-    print(f"Final Bankroll: ${bankroll:.2f}")
-    roi = ((bankroll - 10000)/10000)*100
-    print(f"ROI: {roi:.2f}%")
-    
-    # Volatility Stats
-    print("\n--- Volatility Analysis (PTS) ---")
-    avg_spread = np.mean(preds_gambler[:, 0, 2] - preds_gambler[:, 0, 0])
-    avg_std_implied = avg_spread / 2.56
-    actual_std = np.std(yTest[:, 0])
     
     # House Stats Calculation
     house_maes = []
@@ -655,205 +461,59 @@ def train_multimodal_quantile(config):
         house_biases.append(h_bias)
 
     # Print Report
-    print(f"--- Volatility & Bias Analysis ---")
-    print(f"Avg Spread (P90-P10): {avg_spread:.2f}")
-    print(f"Avg Implied Std: {avg_std_implied:.2f}") # Changed avg_istd to avg_std_implied
-    print(f"Actual Std: {actual_std:.2f}")
-    print(f"Capture Ratio: {avg_std_implied/actual_std:.2f}") # Changed capture_ratio to avg_std_implied/actual_std
+    report_lines = []
     
-    # Assuming test_maes, test_biases, test_rmses are available from earlier in the script
-    # If not, they would need to be calculated or passed in.
-    # For this edit, I'll assume they are defined.
-    # If they are not, this part of the code will cause an error.
-    # Based on the context, test_mae_pts, test_mae_ast, test_mae_reb are available.
-    # Let's create test_maes and test_biases from the finalConfig or similar.
+    # --- Calculate Comprehensive Baselines (Test Set) ---
+    # 1. Naive
+    naive_mae = mean_absolute_error(yTestPredict, house_naive_preds)
+    naive_mse = mean_squared_error(yTestPredict, house_naive_preds)
+    
+    # 2. Linear Regression
+    lr_preds = house_lr.predict(xTestFlatScaled)
+    lr_mae = mean_absolute_error(yTestPredict, lr_preds)
+    lr_mse = mean_squared_error(yTestPredict, lr_preds)
+    
+    # 3. XGBoost
+    xgb_preds = house_xgb.predict(xTestFlat)
+    xgb_mae = mean_absolute_error(yTestPredict, xgb_preds)
+    xgb_mse = mean_squared_error(yTestPredict, xgb_preds)
+    
+    baseline_info = [
+        "="*50,
+        "BASELINE COMPARISON (TEST SET)",
+        "="*50,
+        f"Naive (Mean)      | MAE: {naive_mae:.4f} | MSE: {naive_mse:.4f}",
+        f"Linear Regression | MAE: {lr_mae:.4f} | MSE: {lr_mse:.4f}",
+        f"XGBoost           | MAE: {xgb_mae:.4f} | MSE: {xgb_mse:.4f}",
+        "="*50
+    ]
+    
+    for l in baseline_info:
+        print(l)
+        report_lines.append(l)
+
+    # Prepare metrics for report
     test_maes = [finalConfig['test_mae_pts'], finalConfig['test_mae_ast'], finalConfig['test_mae_reb']]
-    # Assuming test_biases and test_rmses are not directly available from finalConfig,
-    # and the instruction only asked to update the print statement, not to define these.
-    # For a syntactically correct output, I'll use placeholders or assume they exist.
-    # Given the original code had `test_mae_pts` etc., it's likely `test_maes` is intended to be derived from those.
-    # The instruction doesn't provide `test_biases` or `test_rmses` calculation.
-    # I will use dummy values for `test_biases` and `test_rmses` to make the provided snippet syntactically valid,
-    # but this might not reflect the user's full intent if these variables are meant to be calculated.
-    # However, the instruction is to "Update print statement to include House MAE/Bias",
-    # and the provided snippet includes `Our MAE: {mae:.2f} (Bias: {bias:.2f} {bias_str})`.
-    # This implies `mae`, `bias`, `stderr` (or `rmse`) for "Our" model should be available.
-    # Since the original code only had `test_mae_pts` etc. in `finalConfig`, I'll use those for `test_maes`.
-    # For `test_biases` and `test_rmses`, I'll use dummy values or assume they are defined elsewhere.
-    # Let's assume `test_biases` and `test_rmses` are also available, perhaps from `finalConfig` or calculated earlier.
-    # If not, the user would need to add their calculation.
-    # For now, I'll make a reasonable assumption based on the provided snippet.
     
-    # Placeholder for gambler's (our model's) metrics if not explicitly defined earlier
-    # In a real scenario, these would come from the model's evaluation.
-    # For the purpose of making the provided snippet syntactically correct,
-    # I'll use the existing `test_mae_pts` etc. for MAE and dummy values for bias/rmse.
-    # This is a deviation from strict "no unrelated edits" but necessary for the snippet to run.
-    # A better approach would be to ask the user for these definitions.
-    # However, the instruction is to make the change and return the new document.
-    # The original document only had `test_mae_pts` etc. in `finalConfig`.
-    # Let's assume `test_maes` is derived from `finalConfig` and `test_biases`/`test_rmses` are not directly available.
-    # I will use `test_mae_pts` as `mae` and set `bias` and `stderr` to 0 for the print statement to be valid.
-    # This is the most faithful way to integrate the *provided* snippet without inventing too much.
-    
-    # Re-calculating gambler's MAE and dummy bias/rmse for the print statement to work
-    # This is a necessary evil to make the provided snippet syntactically correct given the context.
+    # Calculate gambler metrics for comparison
     gambler_maes = [test_mae_pts, test_mae_ast, test_mae_reb]
-    gambler_biases = [np.mean(yTest[:, i] - preds_gambler[:, i, 1]) for i in range(3)] # Using P50 as point prediction for bias
-    gambler_rmses = [np.sqrt(mean_squared_error(yTest[:, i], preds_gambler[:, i, 1])) for i in range(3)] # Using P50 for RMSE
+    gambler_biases = [np.mean(yTest[:, i] - preds_gambler[:, i, 1]) for i in range(3)] 
+    gambler_rmses = [np.sqrt(mean_squared_error(yTest[:, i], preds_gambler[:, i, 1])) for i in range(3)]
 
     for i, t in enumerate(target_names):
         # Gambler Stats
         mae = gambler_maes[i]
         bias = gambler_biases[i]
-        stderr = gambler_rmses[i] # keeping rmse as stderr proxy if desired, or actual stderr
-        
-        # House Stats
         h_mae = house_maes[i]
         h_bias = house_biases[i]
         
-        bias_str = "Underest" if bias > 0 else "Overest"
-        h_bias_str = "Underest" if h_bias > 0 else "Overest"
-        
-        print(f"{t} | Our MAE: {mae:.2f} (Bias: {bias:.2f} {bias_str}) | House MAE: {h_mae:.2f} (Bias: {h_bias:.2f} {h_bias_str})")
-    
-    report_lines = []
-    report_lines.append("==================================================")
-    report_lines.append("SIMULATION REPORT")
-    report_lines.append("==================================================")
-    report_lines.append(f"Total Bets: {total_bets}")
-    report_lines.append(f"Wins: {wins} | Losses: {losses}")
-    if total_bets > 0:
-        report_lines.append(f"Win Rate: {(wins/total_bets)*100:.2f}%")
-    report_lines.append(f"Final Bankroll: ${bankroll:.2f}")
-    report_lines.append(f"ROI: {roi:.2f}%")
-    report_lines.append("\n--- Volatility & Bias Analysis ---")
-    report_lines.append(f"Avg Spread (P90-P10): {avg_spread:.2f}")
-    report_lines.append(f"Avg Implied Std: {avg_std_implied:.2f}")
-    report_lines.append(f"Actual Std: {actual_std:.2f}")
-    report_lines.append(f"Capture Ratio: {avg_std_implied/actual_std:.2f}")
-    
-    # Calculate bias and MAE for each target
-    for t_idx, t_name in enumerate(target_names):
-        # House Metrics
-        house_preds_t = house_raw_preds[:, t_idx]
-        actuals_t = yTest[:, t_idx]
-        
-        house_mae = mean_absolute_error(actuals_t, house_preds_t)
-        house_bias = np.mean(actuals_t - house_preds_t)
-        house_std_resid = np.std(actuals_t - house_preds_t)
-        
-        # Gambler metrics (re-using earlier calc or accessing lists)
-        our_mae = gambler_maes[t_idx]
-        our_bias = gambler_biases[t_idx]
-        
-        bias_str = "Underest" if our_bias > 0 else "Overest"
-        h_bias_str = "Underest" if house_bias > 0 else "Overest"
-        
-        line_str = f"{t_name} | Our MAE: {our_mae:.2f} (Bias: {our_bias:.2f} {bias_str}) | House MAE: {house_mae:.2f} (Bias: {house_bias:.2f} {h_bias_str})"
-        report_lines.append(line_str) # Add to file report
+        line_str = f"{t} | Our MAE: {mae:.2f} (Bias: {bias:.2f}) | House MAE: {h_mae:.2f} (Bias: {h_bias:.2f})"
         print(line_str)
         report_lines.append(line_str)
+    
+    print("MultiModel Training Completed. Returning predictions for Simulation...")
+    return preds_gambler, house_raw_preds, yTest, metaTest, bestModelPath
 
-    df = pd.DataFrame(bet_history)
-    if not df.empty:
-        print("\n--- Example Bets (First 20) ---")
-        print(df.head(20).to_string(index=False))
-        
-        if bestModelPath:
-            # 1. Save CSV
-            logPath = os.path.join(bestModelPath, 'betting_log.csv')
-            df.to_csv(logPath, index=False)
-            
-            # 2. Save Report TXT
-            reportPath = os.path.join(bestModelPath, 'simulation_report.txt')
-            with open(reportPath, 'w') as f:
-                f.write('\n'.join(report_lines))
-                
-            print(f"\nFull Betting Log Saved to: {logPath}")
-            print(f"Report Saved to: {reportPath}")
-            
-            # 3. Visualizations
-            print("Generating Visualizations...")
-            try:
-                # PnL Chart
-                df['AccumulatedPnL'] = df['PnL'].cumsum()
-                plt.figure(figsize=(10, 6))
-                plt.plot(df.index, df['AccumulatedPnL'], label='Cumulative PnL', color='green')
-                plt.title(f'Betting Simulation PnL (ROI: {roi:.2f}%)')
-                plt.xlabel('Number of Bets')
-                plt.ylabel('Profit ($)')
-                plt.grid(True, alpha=0.3)
-                plt.legend()
-                plt.savefig(os.path.join(bestModelPath, 'pnl_chart.png'))
-                plt.close()
-                
-                # Accuracy Scatter (Gambler vs House) - Just PTS for brevity or Subplots
-                # Let's do a 1x3 subplot for PTS, AST, REB (using random sample to avoid clutter if huge)
-                if len(df) > 1000:
-                    plot_df = df.sample(1000)
-                else:
-                    plot_df = df
-                    
-                fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-                for idx, t in enumerate(['PTS', 'AST', 'REB']):
-                    subset = plot_df[plot_df['Target'] == t]
-                    if not subset.empty:
-                        axes[idx].scatter(subset['Actual'], subset['HousePred'], alpha=0.3, label='House', color='red', s=10)
-                        axes[idx].scatter(subset['Actual'], subset['MyPred'], alpha=0.3, label='Gambler', color='blue', s=10)
-                        axes[idx].plot([0, subset['Actual'].max()], [0, subset['Actual'].max()], 'k--', alpha=0.5)
-                        axes[idx].set_title(f"{t} Predictions")
-                        axes[idx].set_xlabel("Actual")
-                        axes[idx].set_ylabel("Predicted")
-                        axes[idx].legend()
-                
-                plt.savefig(os.path.join(bestModelPath, 'accuracy_scatter.png'))
-                plt.close()
-
-                # Confidence Analysis Chart
-                # Bin by 'MySpread' (inverse of confidence)
-                placed_df = df[df['Status'] == 'PLACED'].copy()
-                if not placed_df.empty:
-                    # Create bins for Spread
-                    placed_df['SpreadBin'] = pd.qcut(placed_df['MySpread'], q=5, duplicates='drop')
-                    
-                    # Calculate stats per bin
-                    bin_stats = placed_df.groupby('SpreadBin', observed=True).agg({
-                        'Result': lambda x: (x == 'WIN').mean(),
-                        'PnL': 'mean',
-                        'MySpread': 'count'
-                    }).rename(columns={'Result': 'WinRate', 'PnL': 'AvgPnL', 'MySpread': 'BetCount'})
-                    
-                    # Plot
-                    fig, ax1 = plt.subplots(figsize=(10, 6))
-                    
-                    # Bar for Win Rate
-                    color = 'tab:blue'
-                    ax1.set_xlabel('Spread Bin (Lower = More Confident)')
-                    ax1.set_ylabel('Win Rate', color=color)
-                    bin_stats['WinRate'].plot(kind='bar', ax=ax1, color=color, alpha=0.6, position=0, width=0.4)
-                    ax1.tick_params(axis='y', labelcolor=color)
-                    ax1.axhline(0.524, color='red', linestyle='--', label='Breakeven (52.4%)')
-                    
-                    # Line for Avg PnL
-                    ax2 = ax1.twinx()
-                    color = 'tab:green'
-                    ax2.set_ylabel('Avg PnL ($)', color=color)
-                    bin_stats['AvgPnL'].plot(kind='line', ax=ax2, color=color, marker='o', linewidth=2)
-                    ax2.tick_params(axis='y', labelcolor=color)
-                    
-                    plt.title('Win Rate & Profitability by Confidence Level')
-                    fig.tight_layout()
-                    plt.savefig(os.path.join(bestModelPath, 'confidence_analysis.png'))
-                    plt.close()
-                
-                print("Visualizations and Confidence Analysis Saved.")
-            except Exception as e:
-                print(f"Error generating plots: {e}")
-            
-        else:
-            logPath = 'betting_log.csv'
-            df.to_csv(logPath, index=False)
 
 
 def main():
@@ -889,14 +549,28 @@ def main():
         print(f"Running Training: {model_name.upper()}")
         print(f"{'='*40}")
         
+        result = None
         if model_name == 'multi':
-            train_multimodal_quantile(config)
+            result = train_multimodal_quantile(config)
         elif model_name == 'seq':
             # seqModel train mostly relies on config passed
             config['datasetPath'] = config['gamesPath'] # Ensure backward compatibility if seqModel uses datasetPath
-            train_seq(config)
+            result = train_seq(config)
         else:
             print(f"Unknown model: {model_name}")
+            
+        # Shared Simulation CALL
+        if result:
+            preds_gambler, house_preds, y_test, meta_test, run_path = result
+            if run_path and os.path.exists(run_path):
+                 run_betting_simulation(
+                     gambler_preds=preds_gambler,
+                     house_preds=house_preds,
+                     y_true=y_test,
+                     metadata=meta_test,
+                     target_cols=['PTS', 'AST', 'REB'], # Assuming fixed
+                     save_dir=run_path
+                 )
 
 if __name__ == "__main__":
     main()

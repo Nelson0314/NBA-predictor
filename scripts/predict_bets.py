@@ -1,5 +1,6 @@
 import json
 import pandas as pd
+from datetime import datetime, timedelta, timezone
 import numpy as np
 import os
 import torch
@@ -23,12 +24,58 @@ except ImportError as e:
 warnings.filterwarnings('ignore')
 
 # Config
-MODEL_PATH = os.path.join(SAVED_MODELS_DIR, "quant_ep40_seq5_dm64")
+# Config
+# MODEL_PATH = os.path.join(SAVED_MODELS_DIR, "quant_ep40_seq5_dm64") # Replaced by dynamic
 DATASET_DIR_OLD = DATA_DIR
 DATASET_DIR_NEW = os.path.join(DATA_DIR, "live_2025")
 ODDS_FILE = os.path.join(os.path.dirname(__file__), "..", "event_odds_data.json")
 OUTPUT_FILE = os.path.join(os.path.dirname(__file__), "..", "bets.csv")
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+def find_best_model(base_dir):
+    print(f"Searching for best model in {base_dir}...")
+    best_path = None
+    best_score = float('inf')
+    
+    if not os.path.exists(base_dir):
+        print(f"Warning: {base_dir} does not exist.")
+        return None
+
+    candidates = [os.path.join(base_dir, d) for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
+    
+    if not candidates:
+        print("No model folders found.")
+        return None
+        
+    for p in candidates:
+        c_path = os.path.join(p, 'config.json')
+        if os.path.exists(c_path):
+            try:
+                with open(c_path, 'r') as f:
+                    cfg = json.load(f)
+                    # Priority: valid_loss
+                    score = cfg.get('valid_loss', float('inf'))
+                    
+                    if score < best_score:
+                        best_score = score
+                        best_path = p
+            except:
+                pass
+    
+    if best_path:
+        print(f"Selected Best Model: {os.path.basename(best_path)} (Loss: {best_score:.4f})")
+    else:
+        # Fallback to latest modified
+        print("No valid metrics found. Selecting most recent model.")
+        best_path = max(candidates, key=os.path.getmtime)
+        print(f"Selected Recent Model: {os.path.basename(best_path)}")
+        
+    return best_path
+
+MODEL_PATH = find_best_model(SAVED_MODELS_DIR)
+if not MODEL_PATH:
+    print("CRITICAL: No models found. Exiting.")
+    exit()
 
 # Load Config
 with open(os.path.join(MODEL_PATH, 'config.json'), 'r') as f:
@@ -120,8 +167,16 @@ def parse_odds(file_path):
                     fair_u_price = 1 / fair_p_under
                     
                     # Parse Date from commence_time (e.g. 2025-12-27T...)
-                    # We just want YYYY-MM-DD
-                    game_date = commence.split('T')[0] if commence else "Unknown"
+                    # API returns UTC. Convert to US/Eastern (approx UTC-5 for Winter)
+                    try:
+                        # Handle 'Z' which python 3.6-3.10 might not like with fromisoformat
+                        c_iso = commence.replace('Z', '+00:00')
+                        dt_utc = datetime.fromisoformat(c_iso)
+                        # Adjustment for EST (UTC-5)
+                        dt_et = dt_utc.astimezone(timezone(timedelta(hours=-5)))
+                        game_date = dt_et.strftime('%Y-%m-%d')
+                    except:
+                        game_date = commence.split('T')[0] if commence else "Unknown"
 
                     rows.append({
                         'Date': game_date,

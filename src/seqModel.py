@@ -5,12 +5,51 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from xgboost import XGBRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 import math
 import random
 import os
 import json
 import shutil
 from tqdm import tqdm
+from scipy.stats import norm
+import matplotlib.pyplot as plt
+
+# ==========================================
+# 0. Utils & Loss
+# ==========================================
+def calculate_odds(house_pred, line, std_dev=9.0):
+    """
+    Calculate decimal odds based on the House Prediction vs the Line.
+    Assumes normal distribution with fixed std_dev (approx for NBA player props).
+    """
+    z = (line - house_pred) / std_dev
+    prob_over = 1 - norm.cdf(z)
+    prob_under = 1.0 - prob_over
+    
+    # Avoid infinite odds
+    prob_over = max(0.01, min(0.99, prob_over))
+    prob_under = max(0.01, min(0.99, prob_under))
+    
+    odds_over = 1.0 / prob_over
+    odds_under = 1.0 / prob_under
+    
+    return odds_over, odds_under, prob_over
+
+class QuantileLoss(nn.Module):
+    def __init__(self, quantiles):
+        super().__init__()
+        self.quantiles = quantiles # [0.1, 0.5, 0.9]
+
+    def forward(self, preds, target):
+        loss = 0
+        for i, q in enumerate(self.quantiles):
+            q_preds = preds[:, :, i] 
+            errors = target - q_preds
+            loss += torch.max((q - 1) * errors, q * errors).mean()
+        return loss
 
 # ==========================================
 # 1. 固定隨機種子
@@ -105,7 +144,6 @@ def loadAndPreprocessData(filePath, seqLength=10):
     
     featureCols.append('DAYS_SINCE_LAST_GAME')
     
-    print(f"Features: {len(featureCols)}")
     return gamesData, featureCols, targetCols
 
 def createSequences(data, seqLength, featureCols, targetCols):
@@ -113,7 +151,7 @@ def createSequences(data, seqLength, featureCols, targetCols):
     將資料轉換為序列 (Sliding Window)
     """
     print("Step 2: Generating Sequences...")
-    xList, yList = [], []
+    xList, yList, metaList = [], [], []
     
     # 針對每個球員與賽季分組處理 (確保不跨賽季)
     if 'SEASON_ID' not in data.columns:
@@ -128,15 +166,19 @@ def createSequences(data, seqLength, featureCols, targetCols):
             
         features = group[featureCols].values
         targets = group[targetCols].values
+        player_ids = group['Player_ID'].values
         
         # 滑動視窗
         for i in range(len(group) - seqLength):
             x = features[i : i + seqLength]
             y = targets[i + seqLength]
+            p_id = player_ids[i + seqLength] # ID of the target game
+            
             xList.append(x)
             yList.append(y)
+            metaList.append(p_id)
             
-    return np.array(xList), np.array(yList)
+    return np.array(xList), np.array(yList), np.array(metaList)
 
 # ==========================================
 # 3. Dataset 類別
@@ -181,28 +223,46 @@ class PositionalEncoding(nn.Module):
         return x
 
 class NbaTransformer(nn.Module):
-    def __init__(self, inputDim, dModel, nHead, numLayers, outputDim, dropout=0.1):
+    def __init__(self, inputDim, dModel, nHead, numLayers, outputDim, statEmbedDim=128, dropout=0.1):
         super(NbaTransformer, self).__init__()
         
-        self.embedding = nn.Linear(inputDim, dModel)
+        # 1. Stat Encoder (MLP) - Matching MultiModel exactly
+        # Multi: Linear(In, 128) -> GELU -> Drop -> Linear(128, statEmbedDim) -> GELU
+        self.statEncoder = nn.Sequential(
+            nn.Linear(inputDim, 128),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, statEmbedDim),
+            nn.GELU()
+        )
+        
+        # 2. Projection to dModel
+        self.projection = nn.Linear(statEmbedDim, dModel)
+        
         self.posEncoder = PositionalEncoding(dModel)
         
         encoderLayer = nn.TransformerEncoderLayer(d_model=dModel, nhead=nHead, dropout=dropout, batch_first=True)
         self.transformerEncoder = nn.TransformerEncoder(encoderLayer, num_layers=numLayers)
         
+        # 3. Head - Matching MultiModel exactly
+        # Multi: Linear(dModel, 64) -> ReLU -> Drop -> Linear(64, Out)
         self.decoder = nn.Sequential(
-            nn.Linear(dModel, 32),
-            nn.GELU(),
-            nn.Linear(32, outputDim) 
+            nn.Linear(dModel, 64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, outputDim * 3) # Output 3 quantiles per target
         )
 
     def forward(self, x):
-        x = self.embedding(x) 
+        x = self.statEncoder(x)
+        x = self.projection(x)
         x = self.posEncoder(x)
         x = self.transformerEncoder(x) 
         lastTimeStep = x[:, -1, :] 
         out = self.decoder(lastTimeStep)
-        return out
+        
+        # Reshape to (Batch, NumTargets, 3)
+        return out.view(x.size(0), -1, 3)
 
 # ==========================================
 # 5. 主程式 (Main Execution)
@@ -224,6 +284,12 @@ def train(config):
         valData = gamesData[gamesData['SEASON_ID'].isin(config['valSeasons'])].copy()
         testData = gamesData[gamesData['SEASON_ID'].isin(config['testSeasons'])].copy()
 
+        # Create Player ID -> Name Mapping
+        if 'Player_Name' in gamesData.columns:
+            id_to_name = gamesData[['Player_ID', 'Player_Name']].drop_duplicates(subset='Player_ID').set_index('Player_ID')['Player_Name'].to_dict()
+        else:
+            id_to_name = {}
+
         print(f"Data Split Summary:")
         print(f"  Train Seasons: {config['trainSeasons']} | Records: {len(trainData)}")
         print(f"  Val Seasons:   {config['valSeasons']} | Records: {len(valData)}")
@@ -231,13 +297,13 @@ def train(config):
 
         # 分別產生序列
         print("\\nCreating Sequences for Training Set...")
-        xTrain, yTrain = createSequences(trainData, config['seqLength'], featureCols, targetCols)
+        xTrain, yTrain, metaTrain = createSequences(trainData, config['seqLength'], featureCols, targetCols)
         
         print("Creating Sequences for Validation Set...")
-        xVal, yVal = createSequences(valData, config['seqLength'], featureCols, targetCols)
+        xVal, yVal, metaVal = createSequences(valData, config['seqLength'], featureCols, targetCols)
         
         print("Creating Sequences for Test Set...")
-        xTest, yTest = createSequences(testData, config['seqLength'], featureCols, targetCols)
+        xTest, yTest, metaTest = createSequences(testData, config['seqLength'], featureCols, targetCols)
 
         print(f"\\nSequence Shapes:")
         print(f"  Train: x={xTrain.shape}, y={yTrain.shape}")
@@ -246,6 +312,51 @@ def train(config):
 
         if len(xTrain) == 0:
             raise ValueError("No training data generated! Check Season IDs.")
+
+        # --- Comprehensive Baselines ---
+        print("\nCalculating Baselines (Naive, LR, XGBoost)...")
+        
+        # 1. Naive (Mean)
+        trainMean = np.mean(yTrain, axis=0)
+        naiveError = yVal - trainMean
+        naiveMSE = np.mean(naiveError ** 2)
+        naiveMAE = np.mean(np.abs(naiveError))
+        print(f"  [Naive] Val MSE: {naiveMSE:.4f} | Val MAE: {naiveMAE:.4f}")
+
+        # Flatten for LR/XGB
+        N_tr, S_tr, F_tr = xTrain.shape
+        xTrainFlat = xTrain.reshape(N_tr, -1)
+        
+        N_val, S_val, F_val = xVal.shape
+        xValFlat = xVal.reshape(N_val, -1)
+        
+        # 2. Linear Regression
+        try:
+            lr = LinearRegression()
+            lr.fit(xTrainFlat, yTrain)
+            lrPred = lr.predict(xValFlat)
+            lrMSE = np.mean((yVal - lrPred) ** 2)
+            lrMAE = np.mean(np.abs(yVal - lrPred))
+            print(f"  [Linear] Val MSE: {lrMSE:.4f} | Val MAE: {lrMAE:.4f}")
+        except Exception as e:
+            print(f"  [Linear] Error: {e}")
+
+        # 3. XGBoost
+        try:
+            xgb = XGBRegressor(n_estimators=100, learning_rate=0.1, n_jobs=-1, random_state=42)
+            # XGBoost handles multi-output naturally? 
+            # Standard XGBRegressor supports multi-class but for multi-target regression it might need MultiOutputRegressor wrapper 
+            # or it might handle it if output dim > 1. 
+            # Recent XGBoost versions support multi-output regression natively.
+            xgb.fit(xTrainFlat, yTrain)
+            xgbPred = xgb.predict(xValFlat)
+            xgbMSE = np.mean((yVal - xgbPred) ** 2)
+            xgbMAE = np.mean(np.abs(yVal - xgbPred))
+            print(f"  [XGBoost] Val MSE: {xgbMSE:.4f} | Val MAE: {xgbMAE:.4f}")
+        except Exception as e:
+            print(f"  [XGBoost] Error: {e}")
+            
+        print("-" * 30)
 
         # 標準化 (Features)
         scalerX = StandardScaler()
@@ -282,17 +393,21 @@ def train(config):
         valLoader = DataLoader(valDataset, batch_size=config['batchSize'], shuffle=False, num_workers=0)
         testLoader = DataLoader(testDataset, batch_size=config['batchSize'], shuffle=False, num_workers=0)
 
-        # 3. 建立模型
+        # Initialize Model
+        # Get statEmbedDim from config
+        statEmbedDim = config.get('statEmbedDim', 128) # Default 128 if not set
+        
         model = NbaTransformer(
             inputDim=len(featureCols),
             dModel=config['dModel'],
             nHead=config['nHead'],
             numLayers=config['numLayers'],
             outputDim=len(targetCols),
-            dropout=config.get('dropout', 0.1)
+            statEmbedDim=statEmbedDim,
+            dropout=config['dropout']
         ).to(device)
 
-        criterion = nn.MSELoss()
+        criterion = QuantileLoss([0.1, 0.5, 0.9])
         optimizer = torch.optim.AdamW(model.parameters(), lr=config['learningRate'], weight_decay=1e-5)
 
         # 4. 訓練迴圈
@@ -331,36 +446,36 @@ def train(config):
             # --- Validation ---
             model.eval()
             valLossList = []
-            valSquaredErrorSum = np.zeros(len(targetCols))
+            valAbsoluteErrorSum = np.zeros(len(targetCols))
             valCount = 0
 
             with torch.no_grad():
                 for x, y in valLoader:
                     x, y = x.to(device), y.to(device)
-                    pred = model(x)
+                    pred = model(x) # (B, 3, 3)
                     loss = criterion(pred, y)
                     valLossList.append(loss.item())
 
-                    # Calculate Original Scale Metrics
-                    predOriginal = scalerY.inverse_transform(pred.cpu().numpy())
+                    # Calculate Original Scale Metrics using P50 (Index 1)
+                    predP50 = pred[:, :, 1]
+                    predOriginal = scalerY.inverse_transform(predP50.cpu().numpy())
                     yOriginal = scalerY.inverse_transform(y.cpu().numpy())
                     
                     diff = predOriginal - yOriginal
-                    valSquaredErrorSum += np.sum(diff ** 2, axis=0)
+                    valAbsoluteErrorSum += np.sum(np.abs(diff), axis=0) # Sum Absolute Errors
                     valCount += len(y)
                     
             valMeanLoss = sum(valLossList) / len(valLossList)
             
             # Avoid division by zero
             if valCount > 0:
-                valMseOriginal = valSquaredErrorSum / valCount
-                valRmseOriginal = np.sqrt(valMseOriginal)
+                valMaeOriginal = valAbsoluteErrorSum / valCount
             else:
-                valRmseOriginal = np.zeros(len(targetCols))
+                valMaeOriginal = np.zeros(len(targetCols))
             
             # Print 結果 (這會顯示在 Slurm 的 output file 中)
             print(f"Epoch [{epoch+1}/{config['nEpochs']}] | Train Loss: {trainMeanLoss:.4f} | Val Loss: {valMeanLoss:.4f}")
-            print(f"  >>> Val RMSE (Original): {', '.join([f'{col}={val:.4f}' for col, val in zip(targetCols, valRmseOriginal)])}")
+            print(f"  >>> Val MAE (Original): {', '.join([f'{col}={val:.4f}' for col, val in zip(targetCols, valMaeOriginal)])}")
 
 
             # 儲存最佳模型
@@ -392,11 +507,10 @@ def train(config):
                 # Add current featureCols to config for inference consistency
                 saveConfig = config.copy()
                 saveConfig['featureCols'] = featureCols
-                saveConfig['targetCols'] = targetCols
-                saveConfig['valid_mse'] = bestLoss
-                saveConfig['valid_rmse'] = {col: val for col, val in zip(targetCols, valRmseOriginal)}
+                saveConfig['valid_loss'] = valMeanLoss
+                saveConfig['valid_mae'] = {col: val for col, val in zip(targetCols, valMaeOriginal)}
                 
-                with open(configPath, 'w') as f:
+                with open(os.path.join(runPath, 'config.json'), 'w') as f:
                     json.dump(saveConfig, f, indent=4)
 
                 bestModelPath = runPath
@@ -413,54 +527,148 @@ def train(config):
             model.eval()
             
             testLossList = []
-            testSquaredErrorSum = np.zeros(len(targetCols))
-            testCount = 0
-
+            allGamblerPreds = []
+            
             with torch.no_grad():
                 for x, y in testLoader:
                     x, y = x.to(device), y.to(device)
-                    pred = model(x)
+                    pred = model(x) # (B, 3, 3)
                     loss = criterion(pred, y)
                     testLossList.append(loss.item())
+                    allGamblerPreds.append(pred.cpu().numpy())
 
-                    # Calculate Original Scale Metrics
-                    predOriginal = scalerY.inverse_transform(pred.cpu().numpy())
-                    yOriginal = scalerY.inverse_transform(y.cpu().numpy())
-                    
-                    diff = predOriginal - yOriginal
-                    testSquaredErrorSum += np.sum(diff ** 2, axis=0)
-                    testCount += len(y)
-            
             testMeanLoss = sum(testLossList) / len(testLossList) if testLossList else 0
             
-            if testCount > 0:
-                testMseOriginal = testSquaredErrorSum / testCount
-                testRmseOriginal = np.sqrt(testMseOriginal)
-            else:
-                testRmseOriginal = np.zeros(len(targetCols))
-            print(f"\\nTraining Complete. Best Validation Loss: {bestLoss:.4f}")
-            print(f"Test Loss (MSE): {testMeanLoss:.4f}")
-            print(f"Test RMSE (Original): {', '.join([f'{col}={val:.4f}' for col, val in zip(targetCols, testRmseOriginal)])}")
-            print(f"Model saved to: {bestModelPath}")
+            # Concatenate
+            gamblerPredsScaled = np.concatenate(allGamblerPreds, axis=0) # (N, 3, 3)
+            
+            # Inverse Transform (P10, P50, P90)
+            preds_gambler = np.zeros_like(gamblerPredsScaled)
+            for q in range(3):
+                preds_gambler[:, :, q] = scalerY.inverse_transform(gamblerPredsScaled[:, :, q])
+            
+            # Extract P50 for Metrics
+            predsP50 = preds_gambler[:, :, 1]
+            
+            # --- House Baselines (TEST SET) ---
+            print("Generating House Lines (Hybrid)...")
+            # --- House Baselines Predictions (TEST SET) ---
+            print("Generating House Lines (Hybrid)...")
+            N_test, S_test, F_test = xTest.shape
+            xTestFlat = xTest.reshape(N_test, -1)
+            
+            # 1. Naive (Window Mean)
+            house_naive_preds = np.zeros_like(yTest)
+            for i, tgt in enumerate(targetCols):
+                if tgt in featureCols:
+                    idx = featureCols.index(tgt)
+                    house_naive_preds[:, i] = np.mean(xTest[:, :, idx], axis=1)
+                else:
+                    house_naive_preds[:, i] = trainMean[i]
+            
+            # 2. LR
+            try:
+                preds_lr = lr.predict(xTestFlat)
+            except:
+                preds_lr = house_naive_preds
+                
+            # 3. XGB
+            try:
+                preds_xgb = xgb.predict(xTestFlat)
+            except:
+                preds_xgb = house_naive_preds
+                
+            # Hybrid House Line
+            # Weights: (LR=0.40, XGB=0.45, Naive=0.15)
+            house_preds = (0.40 * preds_lr) + (0.45 * preds_xgb) + (0.15 * house_naive_preds)
+            
+            print("Seq Model Training Completed. Returning predictions for Simulation...")
+            
+            # metaTest is numpy array of IDs
+            return preds_gambler, house_preds, yTest, metaTest, runPath
 
-            # Append Test Metric to Config
+            # --- Reporting ---
+            roi = ((bankroll - 10000)/10000)*100
+            
+            # Calc Metrics
+            test_maes = []
+            for i in range(len(targetCols)):
+                 test_maes.append(mean_absolute_error(yTest[:, i], predsP50[:, i]))
+            
+            avg_spread = np.mean(preds_gambler[:, :, 2] - preds_gambler[:, :, 0])
+             
+            report_lines = []
+            report_lines.append(f"Training Run: {runName}")
+            report_lines.append(f"Best Validation Loss: {bestLoss:.4f}")
+            report_lines.append(f"Test Loss (MSE): {testMeanLoss:.4f}")
+            report_lines.append(f"Test MAE: {test_maes}")
+            report_lines.append(f"Avg Spread: {avg_spread:.2f}")
+            
+            # Baseline Comparision
+            naive_mae = mean_absolute_error(yTest, house_naive_preds)
+            lr_mae = mean_absolute_error(yTest, preds_lr)
+            xgb_mae = mean_absolute_error(yTest, preds_xgb)
+            
+            baseline_info = [
+                "="*50,
+                "BASELINE COMPARISON (TEST SET)",
+                "="*50,
+                f"Naive (Window)    | MAE: {naive_mae:.4f}",
+                f"Linear Regression | MAE: {lr_mae:.4f}",
+                f"XGBoost           | MAE: {xgb_mae:.4f}",
+                "="*50
+            ]
+            report_lines.extend(baseline_info)
+            for l in baseline_info: print(l)
+            
+            report_lines.append("SIMULATION REPORT")
+            report_lines.append("="*50)
+            report_lines.append(f"Total Bets: {total_bets}")
+            report_lines.append(f"Wins: {wins} | Losses: {losses}")
+            if total_bets > 0:
+                report_lines.append(f"Win Rate: {(wins/total_bets)*100:.2f}%")
+            report_lines.append(f"ROI: {roi:.2f}%")
+            report_lines.append(f"Final Bankroll: ${bankroll:.2f}")
+            
+            # Save Report
+            reportPath = os.path.join(bestModelPath, 'simulation_report.txt')
+            with open(reportPath, 'w') as f:
+                f.write('\n'.join(report_lines))
+            print(f"Report Saved to: {reportPath}")
+            
+            # Save CSV
+            df = pd.DataFrame(bet_history)
+            logPath = os.path.join(bestModelPath, 'betting_log.csv')
+            df.to_csv(logPath, index=False)
+            print(f"Betting Log Saved to: {logPath}")
+            
+            # Visualizations
+            if not df.empty:
+                # PnL Chart
+                df['AccumulatedPnL'] = df['PnL'].cumsum()
+                plt.figure(figsize=(10, 6))
+                plt.plot(df.index, df['AccumulatedPnL'], label='Cumulative PnL', color='green')
+                plt.title(f'Betting Simulation PnL (ROI: {roi:.2f}%)')
+                plt.grid(True, alpha=0.3)
+                plt.savefig(os.path.join(bestModelPath, 'pnl_chart.png'))
+                plt.close()
+                print("Visualizations Saved.")
+            
+            # Update Config
             configPath = os.path.join(bestModelPath, 'config.json')
             if os.path.exists(configPath):
                 try:
                     with open(configPath, 'r') as f:
                         finalConfig = json.load(f)
-                    
                     finalConfig['test_mse'] = testMeanLoss
-                    finalConfig['test_rmse'] = {col: val for col, val in zip(targetCols, testRmseOriginal)}
-                    
+                    finalConfig['test_mae'] = {col: val for col, val in zip(targetCols, test_maes)}
                     with open(configPath, 'w') as f:
                         json.dump(finalConfig, f, indent=4)
-                    print("  >>> Updated config.json with Test MSE.")
-                except Exception as e:
-                    print(f"  >>> Warning: Could not update config with test loss: {e}")
+                except:
+                    pass
         else:
-            print("No model was saved during training.")
-
+            print("No model was saved.")
+            
     except Exception as e:
         print(f"\\nAn error occurred: {e}")
         import traceback
