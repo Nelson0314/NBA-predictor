@@ -209,3 +209,32 @@ team_stats.to_csv(os.path.join(OUTPUT_DIR, 'teams_2025.csv'), index=False)
 print(f"  Saved teams_2025.csv ({len(team_stats)} rows)")
 
 print("Done.")
+
+# ==========================================
+# 5. Post-Update Verification
+# ==========================================
+print("\n" + "="*40)
+print("VERIFYING DATA INTEGRITY")
+print("="*40)
+
+def verify_file(fname, unique_cols):
+    fpath = os.path.join(OUTPUT_DIR, fname)
+    if not os.path.exists(fpath):
+        print(f"[MISSING] {fname}")
+        return
+        
+    df = pd.read_csv(fpath, low_memory=False)
+    dups = df[df.duplicated(subset=unique_cols, keep=False)]
+    
+    if dups.empty:
+        print(f"[OK] {fname}: {len(df)} rows, 0 duplicates.")
+    else:
+        print(f"[WARNING] {fname}: Found {len(dups)} duplicates!")
+        # Optional: Auto-fix?
+        # df.drop_duplicates(subset=unique_cols, inplace=True)
+        # df.to_csv(fpath, index=False)
+        # print("  (Auto-removed duplicates)")
+
+verify_file('games_2025.csv', ['GAME_ID', 'Player_ID'])
+verify_file('shots_2025.csv', ['GAME_ID', 'Player_ID', 'GAME_EVENT_ID'])
+print("="*40)

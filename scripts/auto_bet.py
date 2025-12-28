@@ -27,8 +27,8 @@ def main():
     run_step("Fetching Latest Odds", ["python", "src/odds.py"])
     
     # 3. Generate/Update Heatmaps
-    # Ensures we have heatmaps for the newly fetched games
-    run_step("Updating Heatmaps", ["python", "scripts/generate_heatmaps_2025.py"])
+    # Sequence Model does not use Heatmaps.
+    # run_step("Updating Heatmaps", ["python", "scripts/generate_heatmaps_2025.py"])
     
     # 4. Generate Predictions & Bets
     # Reads event_odds_data.json and generates bets.csv

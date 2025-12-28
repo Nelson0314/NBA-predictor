@@ -1,3 +1,4 @@
+
 import json
 import pandas as pd
 from datetime import datetime, timedelta, timezone
@@ -6,6 +7,8 @@ import os
 import torch
 import torch.nn as nn
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.linear_model import LinearRegression
+from xgboost import XGBRegressor
 from scipy.stats import norm
 from tqdm import tqdm
 import warnings
@@ -14,35 +17,36 @@ import sys
 # Add root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.config import DATA_DIR, SAVED_MODELS_DIR, GAMES_PATH, TEAMS_PATH
-try:
-    from src.multiModel import loadAndPreprocessData, createMultimodalSequences, preloadHeatmaps, NbaMultimodal
-    from src.odds import fetch_odds # Import fetch_odds
-except ImportError as e:
-    print(f"Error importing src modules: {e}")
-    exit()
+from src.config import DATA_DIR, SAVED_MODELS_DIR, ROOT_DIR
+from src.seqModel import NbaTransformer, loadAndPreprocessData, createSequences
+from src.odds import fetch_odds
 
 warnings.filterwarnings('ignore')
 
 # Config
-# Config
-# MODEL_PATH = os.path.join(SAVED_MODELS_DIR, "quant_ep40_seq5_dm64") # Replaced by dynamic
 DATASET_DIR_OLD = DATA_DIR
 DATASET_DIR_NEW = os.path.join(DATA_DIR, "live_2025")
 ODDS_FILE = os.path.join(os.path.dirname(__file__), "..", "event_odds_data.json")
 OUTPUT_FILE = os.path.join(os.path.dirname(__file__), "..", "bets.csv")
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+# ==========================================
+# 0. Model Discovery & Config
+# ==========================================
 def find_best_model(base_dir):
-    print(f"Searching for best model in {base_dir}...")
+    seq_dir = os.path.join(base_dir, "seq")
+    if not os.path.exists(seq_dir): seq_dir = base_dir
+        
+    print(f"Searching for best model in {seq_dir}...")
     best_path = None
     best_score = float('inf')
     
-    if not os.path.exists(base_dir):
-        print(f"Warning: {base_dir} does not exist.")
-        return None
+    # Check if config exists directly (case where files are flat in seq dir)
+    if os.path.exists(os.path.join(seq_dir, 'config.json')):
+        print(f"Found model directly in: {seq_dir}")
+        return seq_dir
 
-    candidates = [os.path.join(base_dir, d) for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
+    candidates = [os.path.join(seq_dir, d) for d in os.listdir(seq_dir) if os.path.isdir(os.path.join(seq_dir, d))]
     
     if not candidates:
         print("No model folders found.")
@@ -54,20 +58,15 @@ def find_best_model(base_dir):
             try:
                 with open(c_path, 'r') as f:
                     cfg = json.load(f)
-                    # Priority: valid_loss
                     score = cfg.get('valid_loss', float('inf'))
-                    
                     if score < best_score:
                         best_score = score
                         best_path = p
-            except:
-                pass
+            except: pass
     
     if best_path:
         print(f"Selected Best Model: {os.path.basename(best_path)} (Loss: {best_score:.4f})")
     else:
-        # Fallback to latest modified
-        print("No valid metrics found. Selecting most recent model.")
         best_path = max(candidates, key=os.path.getmtime)
         print(f"Selected Recent Model: {os.path.basename(best_path)}")
         
@@ -78,18 +77,11 @@ if not MODEL_PATH:
     print("CRITICAL: No models found. Exiting.")
     exit()
 
-# Load Config
 with open(os.path.join(MODEL_PATH, 'config.json'), 'r') as f:
     CONFIG = json.load(f)
 
-# Set dynamic SEQ_LENGTH
-SEQ_LENGTH = CONFIG.get('seqLength', 5)
+SEQ_LENGTH = CONFIG.get('seqLength', 7)
 print(f"Using SEQ_LENGTH: {SEQ_LENGTH}")
-
-# Feature Cols (Must match training)
-# We need to replicate the 'train_house_models' feature extraction just to get the list of columns and the scaler.
-# To avoid slow re-training, we will just use the same logic to load data and fit scaler.
-FEATURE_COLS = [] # Will be populated
 
 # ==========================================
 # 1. Parsing Odds
@@ -100,384 +92,320 @@ def parse_odds(file_path):
         data = json.load(f)
     
     rows = []
-    # Structure: List[Game] -> bookmakers -> markets -> outcomes
     for game in data:
-        home = game.get('home_team')
-        away = game.get('away_team')
         commence = game.get('commence_time')
-        
-        # We only look for 'fanduel' or first available
         bookie = next((b for b in game['bookmakers'] if b['key'] == 'fanduel'), None)
-        if not bookie:
-            bookie = game['bookmakers'][0] if game['bookmakers'] else None
-        
-        if not bookie:
-            continue
+        if not bookie: bookie = game['bookmakers'][0] if game['bookmakers'] else None
+        if not bookie: continue
             
         for market in bookie['markets']:
-            m_key = market['key'] # e.g. player_points
-            
-            # Target mapping
+            m_key = market['key']
             target_map = {
-                'player_points': 'PTS',
-                'player_assists': 'AST',
-                'player_rebounds': 'REB',
+                'player_points': 'PTS', 'player_assists': 'AST', 'player_rebounds': 'REB',
                 'player_points_rebounds_assists': 'PTS+REB+AST',
-                'player_points_rebounds': 'PTS+REB',
-                'player_points_assists': 'PTS+AST',
+                'player_points_rebounds': 'PTS+REB', 'player_points_assists': 'PTS+AST',
                 'player_rebounds_assists': 'REB+AST'
             }
-            if m_key not in target_map:
-                continue
-            
+            if m_key not in target_map: continue
             tgt = target_map[m_key]
             
-            # Outcomes grouped by player? No, list of all outcomes.
-            # Usually pairs of Over/Under for same player & line.
-            # We need to group them.
-            outcomes = market['outcomes']
-            
-            # Helper dict to pair them: (Player, Point) -> {Over_Price, Under_Price}
             lines_dict = {}
-            for out in outcomes:
-                p_name = out['description']
-                side = out['name'] # Over / Under
-                price = out['price']
-                point = out['point']
-                
-                k = (p_name, point)
-                if k not in lines_dict:
-                    lines_dict[k] = {}
-                lines_dict[k][side] = price
+            for out in market['outcomes']:
+                k = (out['description'], out['point'])
+                if k not in lines_dict: lines_dict[k] = {}
+                lines_dict[k][out['name']] = out['price']
             
-            # Now process the pairs
             for (p_name, point), prices in lines_dict.items():
                 if 'Over' in prices and 'Under' in prices:
                     o_price = prices['Over']
                     u_price = prices['Under']
-                    
-                    # Calculate No Vig
-                    p_over = 1 / o_price
-                    p_under = 1 / u_price
+                    p_over = 1/o_price
+                    p_under = 1/u_price
                     margin = p_over + p_under
-                    
                     fair_p_over = p_over / margin
                     fair_p_under = p_under / margin
                     
-                    fair_o_price = 1 / fair_p_over
-                    fair_u_price = 1 / fair_p_under
-                    
-                    # Parse Date from commence_time (e.g. 2025-12-27T...)
-                    # API returns UTC. Convert to US/Eastern (approx UTC-5 for Winter)
                     try:
-                        # Handle 'Z' which python 3.6-3.10 might not like with fromisoformat
                         c_iso = commence.replace('Z', '+00:00')
                         dt_utc = datetime.fromisoformat(c_iso)
-                        # Adjustment for EST (UTC-5)
                         dt_et = dt_utc.astimezone(timezone(timedelta(hours=-5)))
                         game_date = dt_et.strftime('%Y-%m-%d')
                     except:
                         game_date = commence.split('T')[0] if commence else "Unknown"
 
                     rows.append({
-                        'Date': game_date,
-                        'Player_Name': p_name,
-                        'Target': tgt,
-                        'Line': point,
-                        'Odds_Over': o_price,
-                        'Odds_Under': u_price,
-                        'FairPro_Over': round(fair_p_over, 3),
-                        'FairPro_Under': round(fair_p_under, 3),
-                        'FairOdds_Over': round(fair_o_price, 2),
-                        'FairOdds_Under': round(fair_u_price, 2)
+                        'Date': game_date, 'Player_Name': p_name, 'Target': tgt, 'Line': point,
+                        'Odds_Over': o_price, 'Odds_Under': u_price,
+                        'FairPro_Over': round(fair_p_over, 3), 'FairPro_Under': round(fair_p_under, 3),
+                        'FairOdds_Over': round(1/fair_p_over, 2), 'FairOdds_Under': round(1/fair_p_under, 2)
                     })
+    return pd.DataFrame(rows)
+
+# ==========================================
+# 2. Baseline Helper
+# ==========================================
+def train_baselines(games_all, feat_cols, target_cols):
+    print("Training Baseline Models (Naive, LR, XGB)...")
     
-    df = pd.DataFrame(rows)
-    print(f"  Found {len(df)} props.")
-    return df
+    # 1. Create Sequences
+    # Use createSequences from seqModel (returns x, y, meta)
+    # x: (N, Seq, F)
+    x, y, _ = createSequences(games_all, SEQ_LENGTH, feat_cols, target_cols)
+    
+    # Flatten x for LR/XGB
+    N, S, F = x.shape
+    x_flat = x.reshape(N, S*F)
+    
+    # Y is usually (N, 3) for PTS, AST, REB
+    # Make sure we only take first 3 if more exist
+    y_target = y[:, :3]
+    
+    # Train LR
+    lr = LinearRegression()
+    lr.fit(x_flat, y_target)
+    
+    # Train XGB
+    xgb_models = []
+    for i in range(3):
+        m = XGBRegressor(n_estimators=100, max_depth=5, learning_rate=0.1, n_jobs=-1)
+        m.fit(x_flat, y_target[:, i])
+        xgb_models.append(m)
+        
+    # Calculate Residuals (Stds) for Direct Comparison logic
+    lr_pred = lr.predict(x_flat)
+    lr_stds = [np.std(y_target[:, i] - lr_pred[:, i]) for i in range(3)]
+    
+    xgb_pred = np.column_stack([m.predict(x_flat) for m in xgb_models])
+    xgb_stds = [np.std(y_target[:, i] - xgb_pred[:, i]) for i in range(3)]
+    
+    return lr, lr_stds, xgb_models, xgb_stds
 
 # ==========================================
-# 2. Model Definition (Reused)
-# ==========================================
-class NbaMultimodalQuantile(NbaMultimodal):
-    def __init__(self, numStatFeatures, seqLength, numTargets=3, cnnEmbedDim=64, statEmbedDim=128, dModel=128, nHead=4, numLayers=2, dropout=0.1):
-        super().__init__(numStatFeatures, seqLength, numTargets, cnnEmbedDim, statEmbedDim, dModel, nHead, numLayers, dropout)
-        self.quantiles = [0.1, 0.5, 0.9]
-        self.num_quantiles = len(self.quantiles)
-        self.num_targets = numTargets
-        self.head = nn.Sequential(
-            nn.Linear(dModel, 64),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(64, numTargets * self.num_quantiles)
-        )
-
-    def forward(self, imgSeq, statSeq):
-        batchSize, seqLen, C, H, W = imgSeq.size()
-        imgFlat = imgSeq.view(batchSize * seqLen, C, H, W)
-        visualEmbeds = self.cnnEncoder(imgFlat) 
-        visualEmbeds = visualEmbeds.view(batchSize, seqLen, -1)
-        statEmbeds = self.statEncoder(statSeq) 
-        fusionInput = torch.cat([visualEmbeds, statEmbeds], dim=2)
-        fusionEmbeds = self.fusionProj(fusionInput)
-        transformerOut = self.transformer(fusionEmbeds)
-        lastState = transformerOut[:, -1, :] 
-        return self.head(lastState)
-
-# ==========================================
-# 3. Predict & Bet
+# 3. Main Logic
 # ==========================================
 def main():
-    # Fetch Fresh Odds
-    print("Updating Odds Data...")
-    try:
-        fetch_odds()
-    except Exception as e:
-        print(f"Warning: Automatic odds fetch failed ({e}). Using existing file if available.")
+    # Only fetch if missing to avoid redundancy in autobet
+    if not os.path.exists(ODDS_FILE):
+        print("Odds file missing. Fetching...")
+        try: fetch_odds()
+        except Exception as e: print(f"Odds Fetch Warning: {e}")
+    else:
+        print("Using existing odds data (Skipping fetch)...")
         
     odds_df = parse_odds(ODDS_FILE)
-    if odds_df.empty:
-        print("No odds found.")
-        return
+    if odds_df.empty: print("No odds found."); return
 
-    # Load 2025 Data
-    # Note: update_live_2025.py now generates clean data directly.
-    print("Loading 2025 Data for Context...")
-    gamesPathNew = os.path.join(DATASET_DIR_NEW, 'games_2025.csv')
-    shotsPathNew = os.path.join(DATASET_DIR_NEW, 'shots_2025.csv')
-    teamsPathNew = os.path.join(DATASET_DIR_NEW, 'teams_2025.csv')
-    
-    # We load using multiModel logic to get features
-    # But we need FEATURE_COLS first. 
-    # To get correct FEATURE_COLS and SCALER, we MUST load OLD data first.
-    print("Loading Historic Data to Fit Scaler...")
+    # Load All Data
+    print("Loading and Merging Data...")
     gamesPathOld = os.path.join(DATASET_DIR_OLD, 'games.csv')
-    teamsPathOld = os.path.join(DATASET_DIR_OLD, 'teams.csv')
+    gamesPathNew = os.path.join(DATASET_DIR_NEW, 'games_2025.csv')
     
-    # Load Old to get columns and fit scaler
-    # Note: loadAndPreprocessData calculates Rolling stats.
-    # We rely on it to define the feature set.
-    # Returns: gamesData, shotsGrouped, featureCols, targetCols
-    gamesOld, _, featureCols, _ = loadAndPreprocessData(gamesPathOld, None, teamsPathOld, SEQ_LENGTH)
+    # Concatenate raw CSVs then load to handle rolling features properly
+    temp_path = os.path.join(DATA_DIR, "combined_temp.csv")
+    df1 = pd.read_csv(gamesPathOld, low_memory=False)
+    if os.path.exists(gamesPathNew):
+        df2 = pd.read_csv(gamesPathNew, low_memory=False)
+        df_all = pd.concat([df1, df2], ignore_index=True).drop_duplicates(subset=['GAME_ID', 'Player_ID'])
+    else:
+        df_all = df1
+        
+    df_all.to_csv(temp_path, index=False)
     
-    print(f"DEBUG: featureCols length: {len(featureCols)}")
+    # Load and Preprocess (Calculates Rolling Stats)
+    gamesAll, featureCols, targetCols = loadAndPreprocessData(temp_path, SEQ_LENGTH)
+    try: os.remove(temp_path)
+    except: pass
+
+    # --- Train Baselines ---
+    lr_model, lr_stds, xgb_models, xgb_stds = train_baselines(gamesAll, featureCols, targetCols)
     
-    # Fit Scaler
-    print("Fitting Scaler...")
+    # --- Load Sequence Model ---
+    print("Loading Sequence Model...")
     scaler = StandardScaler()
-    scaler.fit(gamesOld[featureCols].values)
+    scaler.fit(gamesAll[featureCols].values)
     
-    # Load New (using same feature cols logic)
-    print("Processing 2025 Data...")
-    gamesNew, shotsNew, _, _ = loadAndPreprocessData(gamesPathNew, shotsPathNew, teamsPathNew, SEQ_LENGTH)
+    scalerY = MinMaxScaler()
+    scalerY.fit(gamesAll[['PTS', 'AST', 'REB']].values)
     
-    # Load Heatmaps
-    heatmapDirNew = os.path.join(DATASET_DIR_NEW, 'heatmaps')
-    heatmapCache = preloadHeatmaps(heatmapDirNew)
-    
-    # Load Model
-    print("Loading Model...")
-    model = NbaMultimodalQuantile(
-        numStatFeatures=len(featureCols),
-        seqLength=SEQ_LENGTH,
-        numTargets=3,
-        cnnEmbedDim=CONFIG['cnnEmbedDim'],
-        statEmbedDim=CONFIG['statEmbedDim'],
-        dModel=CONFIG['dModel'],
-        nHead=CONFIG['nHead'],
-        numLayers=CONFIG['numLayers'],
-        dropout=CONFIG['dropout']
+    statEmbedDim = CONFIG.get('statEmbedDim', 128)
+    model = NbaTransformer(
+        inputDim=len(featureCols), dModel=CONFIG['dModel'], nHead=CONFIG['nHead'], 
+        numLayers=CONFIG['numLayers'], outputDim=3, statEmbedDim=statEmbedDim, dropout=CONFIG['dropout']
     ).to(DEVICE)
     
-    print(f"DEBUG: Model Initialized.")
-    print(f"DEBUG: Model Head: {model.head}")
-    print(f"DEBUG: statEncoder In_Features: {len(featureCols)}")
-    
-    try:
-        model.load_state_dict(torch.load(os.path.join(MODEL_PATH, 'model.ckpt'), map_location=DEVICE))
-    except Exception as e:
-        print(f"CRITICAL ERROR LOADING MODEL: {e}")
-        # Attempt to inspect checkpoint keys for guidance
-        print("Falling back to strict=False for debugging (DO NOT USE IN PROD)...")
-        # model.load_state_dict(..., strict=False)
-        return
-
+    try: model.load_state_dict(torch.load(os.path.join(MODEL_PATH, 'model.ckpt'), map_location=DEVICE))
+    except Exception as e: print(f"Error loading seq model: {e}"); return
     model.eval()
     
-    # Target Scaler (MinMax) - Needed to Inverse Transform output?
-    # Wait, the model output (from train_with_conf) is SCALED [0,1].
-    # We need the Target Scaler fitted on Old Data too.
-    # createMultimodalSequences in train_house_models does this.
-    # We need to replicate fitting scalerY.
-    print("Fitting Target Scaler...")
-    TARGET_COLS = ['PTS', 'AST', 'REB']
-    # Get y from Old Data
-    # We can just take the target columns from gamesOld
-    # Note: createMultimodalSequences shifts things.
-    # But for scaling, fitting on raw distribution of targets is standard?
-    # Or specifically the 'y' used in training?
-    # In `train_with_conf`, yTrain is used. 
-    # yTrain comes from `createMultimodalSequences`.
-    # Let's fit on raw gamesOld[TARGET_COLS] for simplicity/approximation, 
-    # assuming roughly same distribution.
-    scalerY = MinMaxScaler()
-    scalerY.fit(gamesOld[TARGET_COLS].values)
-    
     # --- Prediction Loop ---
-    # For each player in odds, get last 5 games
-    print("Generating Predictions...")
+    print("Generating Predictions (All Models)...")
     
-    results = []
+    seq_bets = []
+    naive_bets = []
+    lr_bets = []
+    xgb_bets = []
+    hybrid_bets = []
     
-    # Cache player data to avoid repeated lookups
-    player_groups = gamesNew.sort_values('GAME_DATE').groupby('Player_Name')
+    idx_pts = featureCols.index('PTS')
+    idx_ast = featureCols.index('AST')
+    idx_reb = featureCols.index('REB')
+    
+    player_groups = gamesAll.sort_values('GAME_DATE').groupby('Player_Name')
     
     for idx, row in tqdm(odds_df.iterrows(), total=len(odds_df)):
         p_name = row['Player_Name']
-        target_name = row['Target']
-        line = row['Line']
-        
-        if p_name not in player_groups.groups:
-            # Name mismatch check? 
-            # Simple check: try matching without case? 
-            # For now skip.
-            continue
+        if p_name not in player_groups.groups: continue
             
         p_data = player_groups.get_group(p_name)
+        if len(p_data) < SEQ_LENGTH: continue
         
-        if len(p_data) < SEQ_LENGTH:
-            continue
-            
-        # Take last N games
+        # Input Data
         seq_data = p_data.iloc[-SEQ_LENGTH:].copy()
+        feats = seq_data[featureCols].values # (Seq, F)
         
-        # Prepare Features
-        # Scale stats
-        stats = seq_data[featureCols].values # (S, F)
-        stats_scaled = scaler.transform(stats)
-        stats_tensor = torch.tensor(stats_scaled, dtype=torch.float32).unsqueeze(0).to(DEVICE) # (1, S, F)
+        # 1. Sequence Model Predict
+        feats_scaled = scaler.transform(feats)
+        feats_tensor = torch.tensor(feats_scaled, dtype=torch.float32).unsqueeze(0).to(DEVICE)
         
-        # Prepare Images
-        img_list = []
-        for i in range(SEQ_LENGTH):
-            g_id = seq_data.iloc[i]['GAME_ID'] # Patched to GAME_ID
-            p_id = seq_data.iloc[i]['Player_ID']
-            t_id = seq_data.iloc[i]['TEAM_ID'] # Patched to TEAM_ID
-            # Key format matching generate_heatmaps_2025.py
-            # Format: "{int(pid)}_{str(gid).zfill(10)}"
-            h_key = f"{int(p_id)}_{str(g_id).zfill(10)}"
-            
-            if h_key in heatmapCache:
-                img_list.append(heatmapCache[h_key])
-            else:
-                img_list.append(np.zeros((2, 50, 50), dtype=np.float32)) # Pad if missing
-        
-        img_seq = np.array(img_list) # (S, 2, 50, 50)
-        img_tensor = torch.tensor(img_seq, dtype=torch.float32).unsqueeze(0).to(DEVICE)
-        
-        # Predict
         with torch.no_grad():
-            preds_scaled = model(img_tensor, stats_tensor) # (1, 3 targets * 3 quantiles)
+            preds = model(feats_tensor) # (1, 3, 3)
             
-        preds_scaled = preds_scaled.cpu().numpy().reshape(1, 3, 3) # (1, Targets, Quantiles)
-        
-        # Inverse Transform
-        # We need to inverse transform each quantile?
-        # scalerY expects (N, 3). We have (1, 3, 3).
-        # We can treat quantiles as separate items.
-        
-        pred_vals = np.zeros((3, 3)) # (PTS/AST/REB, P10/P50/P90)
+        preds = preds.cpu().numpy().reshape(1, 3, 3)
+        pred_vals_seq = np.zeros((3, 3))
         for q in range(3):
-            # Shape (1, 3)
-            sq = preds_scaled[:, :, q]
-            inv = scalerY.inverse_transform(sq)
-            pred_vals[:, q] = inv[0]
+            inv = scalerY.inverse_transform(preds[:, :, q])
+            pred_vals_seq[:, q] = inv[0]
             
-        # Logic:
-        # Mean ~ P50
-        # Std ~ (P90 - P10) / 2.56
+        # 2. Baseline Predict
+        feats_flat = feats.reshape(1, -1)
         
-        # Helper to get stats for a single target string (e.g., 'PTS')
-        def get_stats(tgt):
-            t_idx = list(TARGET_COLS).index(tgt)
-            p10, p50, p90 = pred_vals[t_idx]
-            mean = p50
-            std = (p90 - p10) / 2.56
-            if std < 0.1: std = 0.1
-            return mean, std
+        # Naive: Mean of last 7 games
+        seq_means = np.mean(feats, axis=0) # (F,)
+        p_naive = seq_means[[idx_pts, idx_ast, idx_reb]]
+        s_naive = np.std(feats, axis=0)[[idx_pts, idx_ast, idx_reb]] # Std of sequence
+        
+        # LR
+        p_lr = lr_model.predict(feats_flat)[0]
+        
+        # XGB
+        p_xgb = np.array([m.predict(feats_flat)[0] for m in xgb_models])
+        
+        # --- Process Logic Helpers ---
+        
+        # A. Sequence Logic (Gaussian EV)
+        def process_seq(vals, row_data):
+            # vals: (3, 3) -> [Target, Quantile]
+            row = row_data.copy()
+            nm = row['Target']
+            
+            def get_stats(tgt):
+                if tgt not in ['PTS','AST','REB']: return 0, 1
+                t_idx = ['PTS','AST','REB'].index(tgt)
+                p10, p50, p90 = vals[t_idx]
+                mean = p50
+                std = (p90 - p10) / 2.56
+                if std < 0.1: std = 0.1
+                return mean, std
+                
+            if '+' in nm:
+                pm, pv = 0.0, 0.0
+                for c in nm.split('+'):
+                    m, s = get_stats(c)
+                    pm += m; pv += s**2
+                ps = np.sqrt(pv)
+            else:
+                pm, ps = get_stats(nm)
+                
+            z = (row['Line'] - pm) / ps
+            p_under = norm.cdf(z)
+            p_over = 1.0 - p_under
+            
+            ev_over = (p_over * row['Odds_Over']) - 1.0
+            ev_under = (p_under * row['Odds_Under']) - 1.0
+            
+            choice = "SKIP"; conf = 0.0; ev = 0.0; odds = 0.0
+            if ev_over > 0.05:
+                choice = "OVER"; conf = p_over; ev = ev_over; odds = row['Odds_Over']
+            elif ev_under > 0.05:
+                choice = "UNDER"; conf = p_under; ev = ev_under; odds = row['Odds_Under']
+                
+            row.update({'Pred_Mean': round(pm,1), 'Pred_Std': round(ps,2), 'Pick': choice, 'Pick_EV': round(ev,3)})
+            return row
 
-        if '+' in target_name:
-            # Composite Target (e.g., PTS+REB+AST)
-            components = target_name.split('+')
-            pred_mean = 0.0
-            pred_var = 0.0
+        # B. Baseline Logic (Direct Compare)
+        def process_base(p_vals, s_vals, row_data):
+            row = row_data.copy()
+            val_map = {'PTS':0, 'AST':1, 'REB':2}
+            mu = 0.0
+            if '+' in row['Target']:
+                for c in row['Target'].split('+'): mu += p_vals[val_map[c]]
+            else:
+                mu = p_vals[val_map[row['Target']]]
+                
+            diff = mu - row['Line']
+            choice = "SKIP"; odds = 0.0
+            if diff > 0: choice = "OVER"; odds = row['Odds_Over']
+            elif diff < 0: choice = "UNDER"; odds = row['Odds_Under']
             
-            for c in components:
-                m, s = get_stats(c)
-                pred_mean += m
-                pred_var += s**2
+            row.update({'Pred_Mean': round(mu,1), 'Edge': round(diff,1), 'Pick': choice, 'Pick_Odds': odds})
+            return row
             
-            # Assuming independence for std dev (sqrt of sum of variances)
-            # Note: This might underestimate variance if stats are positively correlated (likely for stars).
-            pred_std = np.sqrt(pred_var)
+        # Collect Individual Bets
+        b_seq = process_seq(pred_vals_seq, row)
+        b_naive = process_base(p_naive, s_naive, row)
+        b_lr = process_base(p_lr, lr_stds, row)
+        b_xgb = process_base(p_xgb, xgb_stds, row)
+        
+        seq_bets.append(b_seq)
+        naive_bets.append(b_naive)
+        lr_bets.append(b_lr)
+        xgb_bets.append(b_xgb)
+        
+        # --- Hybrid Consensus Logic ---
+        # Strategy: All 4 models must agree on Pick (OVER or UNDER)
+        # Sequence model acts as the "Base" for output values (Mean/EV), but others validate direction.
+        
+        picks = [b_seq['Pick'], b_naive['Pick'], b_lr['Pick'], b_xgb['Pick']]
+        
+        consensus = "SKIP"
+        if all(p == "OVER" for p in picks):
+            consensus = "OVER"
+        elif all(p == "UNDER" for p in picks):
+            consensus = "UNDER"
+            
+        if consensus != "SKIP":
+            # Valid Hybrid Bet
+            # Use columns from Sequence model as main info, but mark as Hybrid
+            # Or maybe average predictions? 
+            # User said "Opinions consistent" - usually implies voting.
+            # I will use Sequence Model's confidence/EV but only emit if consensus exists.
+            h_bet = b_seq.copy()
+            h_bet['Method_Vote'] = "4/4"
+            hybrid_bets.append(h_bet)
+        
+    # Save All
+    out_map = [
+        (seq_bets, OUTPUT_FILE),
+        (naive_bets, 'naive_bet.csv'),
+        (lr_bets, 'linearRegression_bet.csv'),
+        (xgb_bets, 'xgBoost_bet.csv'),
+        (hybrid_bets, 'hybrid_bet.csv')
+    ]
+    
+    for data, fname in out_map:
+        if not data: 
+             # Create empty DF to prevent errors in subsequent scripts if they expect file
+             df = pd.DataFrame(columns=['Date','Player_Name','Target','Line','Pick'])
         else:
-            # Single Target
-            pred_mean, pred_std = get_stats(target_name)
-            
-        if pred_std < 0.1: pred_std = 0.1 # Safety
+             df = pd.DataFrame(data)
         
-        # Calculate Edge
-        # Z-score of Line
-        z = (line - pred_mean) / pred_std
-        prob_under = norm.cdf(z)
-        prob_over = 1.0 - prob_under
+        # Clean cols
+        keep = ['Date', 'Player_Name', 'Target', 'Line', 'Odds_Over', 'Odds_Under', 'Pred_Mean', 'Pick', 'Pick_EV', 'Pick_Odds', 'FairOdds_Over', 'FairOdds_Under', 'Method_Vote']
+        df = df[[c for c in keep if c in df.columns]]
         
-        # Determine Bet
-        # EV calc (Using Real Odds)
-        ev_over = (prob_over * row['Odds_Over']) - 1.0
-        ev_under = (prob_under * row['Odds_Under']) - 1.0
+        df.to_csv(os.path.join(ROOT_DIR, fname), index=False)
         
-        choice = "SKIP"
-        confidence = 0.0
-        chosen_ev = 0.0
-        chosen_odds = 0.0
-        
-        # Threshold (e.g., 55% conf or positive EV)
-        # Strategy: Bet if EV > 0.05 (5% edge)
-        if ev_over > 0.05:
-            choice = "OVER"
-            confidence = prob_over
-            chosen_ev = ev_over
-            chosen_odds = row['Odds_Over']
-        elif ev_under > 0.05:
-            choice = "UNDER"
-            confidence = prob_under
-            chosen_ev = ev_under
-            chosen_odds = row['Odds_Under']
-            
-        row['Pred_Mean'] = round(pred_mean, 1)
-        row['Pred_Std'] = round(pred_std, 2)
-        row['MyProb_Over'] = round(prob_over, 3)
-        row['MyProb_Under'] = round(prob_under, 3)
-        row['Pick'] = choice
-        row['Pick_Conf'] = round(confidence, 3)
-        row['Pick_EV'] = round(chosen_ev, 3)
-        row['Pick_Odds'] = chosen_odds
-        
-        results.append(row)
-        
-    res_df = pd.DataFrame(results)
-    if not res_df.empty:
-        # Reorder columns
-        cols = ['Date', 'Player_Name', 'Target', 'Line', 'Odds_Over', 'Odds_Under', 'FairOdds_Over', 'FairOdds_Under', 
-                'Pred_Mean', 'Pred_Std', 'MyProb_Over', 'MyProb_Under', 'Pick', 'Pick_Conf', 'Pick_EV', 'Pick_Odds']
-        res_df = res_df[cols]
-        print("\nAll Bets Generated:")
-        print(res_df[res_df['Pick'] != 'SKIP'].to_string())
-        res_df.to_csv(OUTPUT_FILE, index=False)
-        print(f"\nSaved to {OUTPUT_FILE}")
-    else:
-        print("No bets generated (maybe no matching players?).")
+    print(f"Done. Saved bets.csv + 3 baselines + hybrid_bet.csv.")
 
 if __name__ == "__main__":
     main()

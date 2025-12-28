@@ -3,7 +3,7 @@ import json
 from scipy.stats import norm
 
 # 你的API金鑰
-API_KEY = "a9d6aa1d61e1eff2b15c5f7152a3b480"
+API_KEY = "507566ed32ab4d902263ce5a407351a7"
 
 def calculate_odds(house_pred, line, std_dev=9.0):
     """
