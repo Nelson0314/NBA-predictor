@@ -57,23 +57,61 @@
   - XGBoost (Tree-based)
 - **Metric**: MAE (Mean Absolute Error).
 
+### Slide 8: Result 1 - Model Performance vs. Data Scale
+- **Observations (Reference: report_full.txt vs. report_7dim.txt)**:
+  Scenario A: Low-Dimensional Data (Raw Features)
 
-### Slide 8: Betting Simulation & ROI Analysis
+Observation: In environments with limited raw features, the Transformer significantly outperforms traditional models (XGBoost/Linear Regression).
+
+Insight: This demonstrates the Transformer's superior capability for Automated Feature Extraction, successfully mining complex latent patterns from raw temporal sequences without human intervention.
+
+Scenario B: High-Dimensional Data (Extensive Feature Engineering)
+
+Observation: When extensive manually engineered features (e.g., rolling averages, lag features) are introduced, traditional models catch up to the Transformer's performance.
+
+Key Conclusion: The Deep Learning architecture effectively replaces the need for laborious manual feature engineering, showcasing the efficiency of end-to-end learning in discovering interactions that otherwise require domain-expert coding.
+
+### Slide 9: Result 2 - The Impact of Spatial Heatmaps (CNN)
+- **Observations (Reference: With CNN vs. No CNN)**:
+  | Model Config | No CNN (Stats only) | With CNN (Multimodal) | Result |
+  | :--- | :--- | :--- | :--- |
+  | **MAE (Lower is better)** | ~3.0827 | ~3.0866 | **No Gain** |
+- **Inference & Hypotheses**:
+  1. **Information Redundancy**: Traditional stats (FG%, 3P%) may already implicitly describe the "where" and "how" of a player's shot profile.
+  2. **Relevance Gap**: Spatial patterns might be crucial for individual shot outcome prediction but are less critical for aggregate game-total counts (PTS/REB).
+  3. **Compression Loss**: Compressing complex 2D image data to match statistical feature dimensions (for fusion) likely stripped away critical spatial information.
+
+### Slide 10: Result 3 - The Value of Confidence (Quantile Regression)
+- **Observations**: The introduction of quantile-based confidence metrics significantly elevates prediction quality for decision-making.
+- **Proof**: This is clearly demonstrated in the **Betting Simulation Results**, where identifying "predictable" games (low spread) accounts for the majority of the realized profit.
+
+### Slide 11: Betting Simulation & ROI Analysis
 - **Execution Strategy**:
   - **Decision Logic**: Only placing bets when the model's P50 prediction significantly deviates from the House Line (Alpha/Edge).
   - **Risk Filtering**: Utilizing the P10-P90 "Spread" to avoid high-volatility/low-confidence scenarios.
 - **Experimental Results**:
-  - **Winning Rate**: Achieving over 55% win rate on high-confidence player props.
-  - **Profitability**: Demonstration of positive long-term ROI against commercial odds (including vig).
-  - **PnL Tracking**: Visual growth of bankroll throughout the 2024-25 season.
+  - **Winning Rate**: Achieving over ?% win rate on high-confidence player props.
+  - **Profitability**: Positive long-term ROI against commercial lines.
+
+### Slide 12: Model Interpretability - Attention Map Analysis
+- **Temporal Dynamics**: Visualizing how the Transformer weights each of the past 7 games.
+- **Key Findings**:
+  - **"Bell-Shaped" Attention**: Interestingly, the weights are often **highest in the middle** of the sequence (games 3-5) and lower at both the earliest and most recent games.
+  - **Stability over Recency**: This suggests the model relies on a "stabilized average form" from the mid-sequence rather than overreacting to the very last game or focusing on outdated long-term history.
+- **Value of Attention**: Identifies the "Anchor Games" that the model uses to stabilize its prediction against extreme outliers.
 
 ---
 
 ## V. Conclusions
-### Slide 10: Summary & Future Work
-- **Key Takeaways**:
-  - Multimodal fusion (Stats + Heatmaps) provides a competitive edge.
-  - Confidence-aware betting reduces drawdown.
-- **Future Improvements**:
-  - Incorporating injury reports and real-time lineup changes.
-  - Expanding to "In-game" live prediction tracking.
+### Slide 13: Summary & Key Takeaways
+- **Architecture Efficiency**: Automated Feature Extraction: Deep Learning demonstrates the ability to mine complex patterns from raw data autonomously, whereas traditional models rely heavily on extensive manual feature engineering to achieve comparable performance.
+- **Redundancy of Visual Data**: Spatial shot history may be redundant for predicting traditional box-score outcomes.
+- **Strategic Success**: Quantile regression is the most critical component for practical application, transforming a prediction model into a risk-management tool.
+
+Slide 13: Future Directions
+
+Extending to NLP & Live Prediction:
+
+Concept: Integrating Play-by-Play text streams and news sentiment analysis using Large Language Models (LLMs).
+
+Goal: To capture contextual nuances that box scores cannot quantify—such as "player injury/discomfort," "defensive intensity," or "momentum shifts"—and advancing the prediction window from pre-game to In-Game (Live Betting).
