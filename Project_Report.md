@@ -8,7 +8,7 @@
 
 ### Slide 2: Hypothesizing the Value of Multimodal Data
 - **Potential Statistical Limits**: Do traditional box scores lack sufficient context for accurate prediction?
-- **Spatial Hypotheses**: We hypothesize that shot heatmaps might reveal tendencies/efficiency hidden from simple averages.
+- **Spatial Hypotheses**: I hypothesize that shot heatmaps might reveal tendencies/efficiency hidden from simple averages.
 - **Proposed Fusion**: Exploring a multimodal approach that combines temporal sequences (Transformer) with spatial history (CNN).
 
 ---
@@ -16,10 +16,10 @@
 ## II. Problem Formulation
 ### Slide 3: Task Definition
 - **Input**: 
-  - Last 7-10 games of statistical features (PTS, AST, REB, MIN, etc.).
+  - Last 7 games of statistical features (PTS, AST, REB, MIN, etc.).
   - Recent shot location history (converted to 2D heatmaps).
 - **Target**: Predict the specific counts for PTS, AST, and REB in the **next** game.
-- **Dataset**: NBA game/shot data from 2016 to 2025.
+- **Dataset**: NBA game/shot data from 2016~2025.
 
 ### Slide 4: Data Processing Pipeline
 - **Temporal Alignment**: Sorting games by date per player, ensuring no data leakage across seasons.
@@ -30,34 +30,42 @@
 
 ## III. Proposed Model
 ### Slide 5: Architecture Overview
-- **Visual Branch**: CNN (Convolutional Neural Network) to extract features from spatial heatmaps.
-- **Statistical Branch**: MLP Encoder to process historical box scores.
-- **Transformer Decoder**: Attention mechanism to weigh the importance of past games in the sequence.
+- **Multi-modal Feature Encoding**:
+  - **Visual (CNN)**: Extracting spatial features from 2D shot heatmaps.
+  - **Statistical (MLP)**: Non-linear embedding of historical box scores.
+- **Sequence Processing (Transformer)**:
+  - **Fusion Layer**: Projecting combined visual and statistical embeddings into a unified latent space.
+  - **Positional Encoding**: Injecting "time" information using Sine and Cosine functions to help the model distinguish the order of games.
+  - **Successive Attention**: Utilizing Multi-Head Attention to identify which past games are most relevant to the next match.
 
 ### Slide 6: Confidence Modeling (Quantile Regression)
-- **Beyond Point Estimation**: Predicting a single number isn't enough for betting.
-- **Quantile Loss**: Outputting 10th, 50th (median), and 90th percentiles.
-- **Uncertainty**: The "Spread" between P10 and P90 indicates the model's confidence in the player's performance.
+- **Point Prediction vs. Distribution**: Standard models (LR, XGB, Naive) only predict a single average value, failing to account for the "range" of potential outcomes.
+- **The Difficulty for non-Deep Learning Models**:
+  - **Single Value Limitation**: Traditional regression focuses on minimizing MSE (Mean Squared Error), which only estimates the mean.
+  
+- **The Advantages of My Multimodal Transformer**:
+  - **End-to-End Quantile Loss**: Only this model is natively trained with a triple-output head (10th, 50th, 90th percentiles).
+  - **Risk Quantification**: By measuring the distance between P10 and P90, the model identifies "High Confidence" vs "High Volatility" scenarios—a critical feature for betting that other models cannot provide.
 
 ---
 
 ## IV. Experimental Results
-### Slide 7: Baseline Comparison
+### Slide 7: Model Comparison
 - **Models Evaluated**:
   - Naive (Historical Mean)
-  - Linear Regression (Baseline)
-  - XGBoost (Tree-based Baseline)
+  - Linear Regression 
+  - XGBoost (Tree-based)
 - **Metric**: MAE (Mean Absolute Error).
-- **Results**: Multimodal Transformer achieves significantly lower MAE (~3.08 Avg) vs. Naive models (~4.38 Avg).
 
-### Slide 8: Betting Simulation Logic
-- **Betting Strategy**: Only placing bets when the model's P50 prediction significantly deviates from the House Line (EV+).
-- **Risk Management**: Kelly Criterion or Fixed Unit staking based on model confidence (Spread).
 
-### Slide 9: Performance & ROI
-- **Winning Rate**: Achieving over 55% win rate on selected player props.
-- **PnL Tracking**: Visual demonstration of bankroll growth over the 2024-25 season.
-- **ROI**: Demonstration of positive Return on Investment against commercial odds (including vig).
+### Slide 8: Betting Simulation & ROI Analysis
+- **Execution Strategy**:
+  - **Decision Logic**: Only placing bets when the model's P50 prediction significantly deviates from the House Line (Alpha/Edge).
+  - **Risk Filtering**: Utilizing the P10-P90 "Spread" to avoid high-volatility/low-confidence scenarios.
+- **Experimental Results**:
+  - **Winning Rate**: Achieving over 55% win rate on high-confidence player props.
+  - **Profitability**: Demonstration of positive long-term ROI against commercial odds (including vig).
+  - **PnL Tracking**: Visual growth of bankroll throughout the 2024-25 season.
 
 ---
 
