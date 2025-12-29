@@ -10,3 +10,4 @@ bets_*.csv
 predictions_*.csv
 event_odds_data.json
 *.npy
+test

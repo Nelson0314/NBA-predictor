@@ -295,7 +295,7 @@ def main():
         # A. Sequence Logic (Gaussian EV)
         def process_seq(vals, row_data):
             # vals: (3, 3) -> [Target, Quantile]
-            row = row_data.copy()
+            row = row_data.to_dict()
             nm = row['Target']
             
             def get_stats(tgt):
@@ -329,12 +329,12 @@ def main():
             elif ev_under > 0.05:
                 choice = "UNDER"; conf = p_under; ev = ev_under; odds = row['Odds_Under']
                 
-            row.update({'Pred_Mean': round(pm,1), 'Pred_Std': round(ps,2), 'Pick': choice, 'Pick_EV': round(ev,3)})
+            row.update({'Pred_Mean': round(pm,1), 'Pred_Std': round(ps,2), 'Pick': choice, 'Pick_EV': round(ev,3), 'Pick_Odds': odds})
             return row
 
         # B. Baseline Logic (Direct Compare)
         def process_base(p_vals, s_vals, row_data):
-            row = row_data.copy()
+            row = row_data.to_dict()
             val_map = {'PTS':0, 'AST':1, 'REB':2}
             mu = 0.0
             if '+' in row['Target']:
