@@ -67,15 +67,22 @@ def setSeed(seed):
 # ==========================================
 # 2. 資料準備函式
 # ==========================================
-def loadAndPreprocessData(filePath, seqLength=10):
+def loadAndPreprocessData(filePath, teamsPath="dataset/teams.csv", seqLength=10):
     print("Step 1: Loading and Cleaning Data...")
     
     # 讀取資料
     if not os.path.exists(filePath):
         raise FileNotFoundError(f"Data file not found at: {filePath}")
         
-    gamesData = pd.read_csv(filePath, low_memory=False)
+    gamesData = pd.read_csv(filePath, low_memory=False, dtype={'GAME_ID': str}) # Force GAME_ID as str
     gamesData = gamesData.loc[:, ~gamesData.columns.duplicated()]
+
+    # Load Teams Data
+    if not os.path.exists(teamsPath):
+        # Fallback if just filename provided
+        teamsPath = os.path.join(os.path.dirname(filePath), 'teams.csv')
+        
+    teamsData = pd.read_csv(teamsPath, low_memory=False, dtype={'GAME_ID': str}) # Force GAME_ID as str
 
     # 定義特徵欄位與目標欄位
     featureCols = [
@@ -99,7 +106,6 @@ def loadAndPreprocessData(filePath, seqLength=10):
     gamesData = gamesData.dropna(subset=allCols)
 
     # 時間排序
-    # 時間排序
     gamesData['GAME_DATE'] = pd.to_datetime(gamesData['GAME_DATE'], errors='coerce')
     gamesData = gamesData.dropna(subset=['GAME_DATE'])
     gamesData = gamesData.sort_values(by=['Player_ID', 'GAME_DATE']).reset_index(drop=True)
@@ -113,14 +119,76 @@ def loadAndPreprocessData(filePath, seqLength=10):
     
     # Parse Matchup for Opponent
     def parse_matchup(m):
-        if pd.isna(m): return None
-        if ' vs. ' in m: return m.split(' vs. ')[1]
-        if ' @ ' in m: return m.split(' @ ')[1]
-        return None
+        if pd.isna(m): return None, None
+        if ' vs. ' in m:
+            parts = m.split(' vs. ')
+            return parts[0], parts[1]
+        elif ' @ ' in m:
+            parts = m.split(' @ ')
+            return parts[0], parts[1]
+        return None, None
 
-    gamesData['OPPONENT_ABBREVIATION'] = gamesData['MATCHUP'].apply(parse_matchup)
+    matchups = gamesData['MATCHUP'].apply(parse_matchup)
+    gamesData['TEAM_ABBREVIATION'] = [x[0] for x in matchups]
+    gamesData['OPPONENT_ABBREVIATION'] = [x[1] for x in matchups]
     
-    # Sort
+    # ---------------------------------------------------------
+    # Merge Team & Opponent Rolling Stats (from teams.csv) - ADDED
+    # ---------------------------------------------------------
+    print("Merging Team Stats (Own + Opponent)...")
+    
+    # Normalize GAME_ID to 10-digit string
+    gamesData['GAME_ID'] = pd.to_numeric(gamesData['GAME_ID'], errors='coerce').fillna(0).astype('int64').astype(str).str.zfill(10)
+    teamsData['GAME_ID'] = pd.to_numeric(teamsData['GAME_ID'], errors='coerce').fillna(0).astype('int64').astype(str).str.zfill(10)
+
+    # Identify stats columns in teams.csv (AVG_*)
+    teamStatsCols = [c for c in teamsData.columns if c.startswith('AVG_')]
+    
+    # Subset for merging
+    teamsSubset = teamsData[['GAME_ID', 'TEAM_ABBREVIATION'] + teamStatsCols].copy()
+
+    # Safety Fix: Shift features to avoid leakage (Just like MultiModel)
+    teamsSubset = teamsSubset.sort_values(by=['TEAM_ABBREVIATION', 'GAME_ID'])
+    stats_cols_only = [c for c in teamsSubset.columns if c.startswith('AVG_')]
+    teamsSubset[stats_cols_only] = teamsSubset.groupby('TEAM_ABBREVIATION')[stats_cols_only].shift(1).fillna(0)
+    
+    # 1. Merge Own Team Stats
+    renameOwn = {c: f'TEAM_{c}' for c in teamStatsCols}
+    teamsSubsetOwn = teamsSubset.rename(columns=renameOwn)
+    
+    gamesData = pd.merge(
+        gamesData, 
+        teamsSubsetOwn, 
+        how='left', 
+        on=['GAME_ID', 'TEAM_ABBREVIATION']
+    )
+    
+    # 2. Merge Opponent Team Stats
+    renameOpp = {c: f'OPP_{c}' for c in teamStatsCols}
+    teamsSubsetOpp = teamsSubset.rename(columns=renameOpp)
+    
+    gamesData = pd.merge(
+        gamesData,
+        teamsSubsetOpp,
+        how='left',
+        left_on=['GAME_ID', 'OPPONENT_ABBREVIATION'],
+        right_on=['GAME_ID', 'TEAM_ABBREVIATION'],
+        suffixes=('', '_opp_merge')
+    )
+    
+    if 'TEAM_ABBREVIATION_opp_merge' in gamesData.columns:
+        gamesData = gamesData.drop(columns=['TEAM_ABBREVIATION_opp_merge'])
+
+    newTeamCols = list(renameOwn.values()) + list(renameOpp.values())
+    for col in newTeamCols:
+        if col not in gamesData.columns:
+            gamesData[col] = 0.0
+        gamesData[col] = gamesData[col].fillna(0)
+        
+    featureCols.extend(newTeamCols)
+    print(f"Team Features Added: {len(newTeamCols)} columns.")
+
+    # Sort Back
     gamesData = gamesData.sort_values(by=['Player_ID', 'SEASON_ID', 'GAME_DATE'])
     
     # Player Rolling
@@ -277,7 +345,8 @@ def train(config):
 
     # 2. 資料處理
     try:
-        gamesData, featureCols, targetCols = loadAndPreprocessData(datasetPath, config['seqLength'])
+        teamsPath = config.get('teamsPath', "dataset/teams.csv")
+        gamesData, featureCols, targetCols = loadAndPreprocessData(datasetPath, teamsPath, config['seqLength'])
         
         # 依照賽季 ID 切分 DataFrame
         trainData = gamesData[gamesData['SEASON_ID'].isin(config['trainSeasons'])].copy()
