@@ -2,14 +2,14 @@
 
 ## I. Motivation
 ### Slide 1: Introduction
-- **Overview**: Predicting NBA player prop outcomes (PTS, AST, REB).
-- **The Challenge**: NBA performance is highly volatile, influenced by matchups, fatigue, and individual shooting fluctuations.
-- **Project Goal**: Leverage both historical statistics and spatial shot metadata to beat professional betting lines.
+- **Overview**: Exploring the predictability of NBA player props (PTS, AST, REB).
+- **The Challenge**: NBA performance is notably volatile. Can we identify patterns amidst matchups and individual fluctuations?
+- **Project Goal**: Investigating whether a deep learning approach can potentially find an edge over professional betting lines.
 
-### Slide 2: Why Multimodal?
-- **Statistical Limits**: Traditional box scores lack spatial context (where are they shooting?).
-- **Spatial Insights**: Shot heatmaps reveal player tendencies/efficiency not captured in simple averages.
-- **Fusion Approach**: Combining temporal sequences (Transformer) with spatial history (CNN).
+### Slide 2: Hypothesizing the Value of Multimodal Data
+- **Potential Statistical Limits**: Do traditional box scores lack sufficient context for accurate prediction?
+- **Spatial Hypotheses**: We hypothesize that shot heatmaps might reveal tendencies/efficiency hidden from simple averages.
+- **Proposed Fusion**: Exploring a multimodal approach that combines temporal sequences (Transformer) with spatial history (CNN).
 
 ---
 
