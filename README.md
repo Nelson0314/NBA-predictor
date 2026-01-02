@@ -1,13 +1,22 @@
-# NBA Player Performance Predictor
+# NBA Player Performance Predictor 🏀
 
-## 🏀 Overiew
-This project utilizes a multimodal Deep Learning approach to predict NBA player performance (Points, Assists, Rebounds). It combines **Temporal Sequences** (past game stats processed by Transformers) with **Spatial History** (shot heatmaps processed by CNNs) to identify patterns in player form and matchups. The model also calculates confidence intervals using **Quantile Regression** to aid in risk assessment for betting scenarios.
+## Overview
+This project leverages **Multimodal Deep Learning** to predict NBA player performance (Points, Assists, Rebounds). By combining **Temporal Sequences** (historical stats processed by Transformers) with **Spatial History** (shot heatmaps processed by CNNs), the model captures both player form and shooting tendencies. Furthermore, it employs **Quantile Regression** (predicting P10, P50, P90) to estimate confidence intervals, providing a critical edge for risk assessment in betting scenarios.
 
-## 🚀 Features
-- **Multimodal Architecture**: Fuses statistical time-series data with visual shot chart heatmaps.
-- **Transformer-based Sequence Modeling**: Captures long-term dependencies in player form.
-- **Quantile Regression**: Predicts P10, P50, and P90 to estimate volatility and confidence.
-- **Betting Simulation**: Includes a strategy engine to backtest predictions against betting lines with ROI analysis.
+## 📂 Repository Structure
+
+### `src/` - Core Modules
+- **`multiModel.py`**: Implementation of the **Multimodal Model** (CNN Encoder + Transformer).
+- **`seqModel.py`**: Implementation of the **Sequence-only Model** (Transformer) for ablation studies.
+- **`graphModel.py`**: Experimental GNN implementation.
+- **`config.py`**: Central configuration for file paths and hyperparameters.
+- **`simulation.py`**: Logic for betting simulations (ROI calculation, Kelly Criterion, etc.).
+
+### `scripts/` - Execution Scripts
+- **`train.py`**: Main entry point for training models.
+- **`comparison.py`**: comprehensive evaluation script comparing Deep Learning models against Baselines (Linear Regression, XGBoost).
+- **`update_live_2025.py`**: Fetches the latest game data via `nba_api` to keep the dataset current.
+- **`predict_bets.py`**: Generates daily predictions for upcoming games and compares them with odds.
 
 ## 🛠️ Installation
 
@@ -22,32 +31,48 @@ This project utilizes a multimodal Deep Learning approach to predict NBA player 
     pip install -r requirements.txt
     ```
 
-## 🏗️ Usage
+## 🚀 Usage
 
-### Training
-To train the multimodal model:
+### 1. Training
+To train the default Multimodal model with Quantile Regression:
 ```bash
-python scripts/train_with_conf.py
+python scripts/train.py --model multimodal --epochs 20
 ```
-This script will:
-- Load data from 2016-2025.
-- Train the transformer model with quantile loss.
-- Save the best model to `savedModels_conf/`.
+**Arguments:**
+- `--model`: Choose architecture: `multimodal` (default), `seq`, or `graph`.
+- `--epochs`: Number of training epochs.
+- `--batch_size`: Batch size (default: 32).
 
-### Prediction & Simulation
-To evaluate the model and run the betting simulation:
+The best model checkpoints are saved to `savedModels_conf/`.
+
+### 2. Evaluation
+To evaluate model performance against baselines on the test set (2024-25 season):
 ```bash
 python scripts/comparison.py
 ```
-This will compare the model's predictions against a baseline and generate profit/loss reports.
+This script acts as the primary benchmark tool, generating:
+- RMSE/MAE comparisons.
+- Profit/Loss (PnL) analysis plots.
+- Evaluation reports in `evaluation_report_*.txt`.
 
-## 📂 Dataset
-The project uses NBA data fetched via `nba_api` covering seasons from 2016-17 to 2024-25. Data includes:
-- **Game Logs**: Traditional box score stats.
-- **Shot Charts**: Spatial coordinate data for every shot attempt.
+### 3. Live Prediction (Betting)
+For daily usage during the NBA season:
+
+**Step A: Update Data**
+Fetch the last night's games to ensure the dataset is up-to-date.
+```bash
+python scripts/update_live_2025.py
+```
+
+**Step B: Generate Predictions**
+Predict stats for upcoming games and compare with market odds.
+```bash
+python scripts/predict_bets.py
+```
+*Note: This requires an `event_odds_data.json` file containing current market lines.*
 
 ## 📄 Reference
-For a detailed technical explanation, please refer to the [IEEE Project Report](docs/Project_Report_IEEE.tex).
+For a deep dive into the architecture, hypothesis, and mathematical formulation, please refer to the [IEEE Project Report](docs/Project_Report_IEEE.tex).
 
 ## 👨‍💻 Author
 **Nelson Weng**
