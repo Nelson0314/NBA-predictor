@@ -8,6 +8,7 @@ import os
 from tqdm import tqdm
 import gc
 import concurrent.futures
+import math
 from .config import DATA_DIR
 
 def load_single_heatmap(args):
@@ -309,6 +310,28 @@ class CnnEncoder(nn.Module):
         x = self.fc(x)
         return x
 
+class PositionalEncoding(nn.Module):
+    def __init__(self, dModel, maxLen=5000):
+        super(PositionalEncoding, self).__init__()
+        
+        # 建立 (maxLen, dModel) 的矩陣
+        pe = torch.zeros(maxLen, dModel)
+        position = torch.arange(0, maxLen, dtype=torch.float).unsqueeze(1)
+        
+        # divTerm 計算: 1 / (10000 ^ (2i / dModel))
+        divTerm = torch.exp(torch.arange(0, dModel, 2).float() * (-math.log(10000.0) / dModel))
+        
+        pe[:, 0::2] = torch.sin(position * divTerm)
+        pe[:, 1::2] = torch.cos(position * divTerm)
+        
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        # x shape: (batchSize, seqLen, dModel)
+        x = x + self.pe[:, :x.size(1), :]
+        return x
+
 class NbaMultimodal(nn.Module):
     def __init__(self, numStatFeatures, seqLength, outputDim, 
                  cnnEmbedDim=64, statEmbedDim=128, 
@@ -333,6 +356,9 @@ class NbaMultimodal(nn.Module):
         
         # Projection to Transformer Dimension (dModel)
         self.fusionProj = nn.Linear(self.jointDim, dModel)
+
+        # Positional Encoding
+        self.posEncoder = PositionalEncoding(dModel)
         
         # Transformer
         encoderLayer = nn.TransformerEncoderLayer(d_model=dModel, nhead=nHead, dropout=dropout, batch_first=True)
@@ -358,6 +384,9 @@ class NbaMultimodal(nn.Module):
         jointEmbeds = torch.cat([visualEmbeds, statEmbeds], dim=2) 
         
         transformerInput = self.fusionProj(jointEmbeds) 
+        
+        # Add Positional Encoding
+        transformerInput = self.posEncoder(transformerInput)
         
         transformerOut = self.transformer(transformerInput)
         

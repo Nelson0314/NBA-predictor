@@ -1,0 +1,55 @@
+{
+    "seed": 42,
+    "seqLength": 7,
+    "batchSize": 64,
+    "nEpochs": 35,
+    "learningRate": 0.0003,
+    "cnnEmbedDim": 64,
+    "statEmbedDim": 128,
+    "dModel": 64,
+    "nHead": 8,
+    "numLayers": 3,
+    "dropout": 0.3,
+    "weightDecay": 0.0,
+    "saveDir": "test/savedModels_7dim",
+    "gamesPath": "dataset/games.csv",
+    "shotsPath": "dataset/shots.csv",
+    "teamsPath": "dataset/teams.csv",
+    "trainSeasons": [
+        22016,
+        22017,
+        22018,
+        22019,
+        22020,
+        22021,
+        22022
+    ],
+    "valSeasons": [
+        22023
+    ],
+    "testSeasons": [
+        22024
+    ],
+    "heatmapDir": "dataset/heatmaps",
+    "models": [
+        "seq"
+    ],
+    "datasetPath": "dataset/games.csv",
+    "featureCols": [
+        "PTS",
+        "AST",
+        "REB",
+        "FG_PCT",
+        "STL",
+        "BLK",
+        "MIN"
+    ],
+    "valid_loss": 0.54262354691605,
+    "valid_mae_pts": 5.334410466814168,
+    "valid_mae_ast": 1.627692054781983,
+    "valid_mae_reb": 2.023065465853178,
+    "test_loss": 0.5579424843074768,
+    "test_mae_pts": 5.503389835357666,
+    "test_mae_ast": 1.6740081310272217,
+    "test_mae_reb": 2.0710678100585938
+}

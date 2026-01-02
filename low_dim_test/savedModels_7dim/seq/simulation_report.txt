@@ -1,0 +1,19 @@
+========================================
+SIMULATION REPORT
+========================================
+Total Bets: 7565
+Wins: 4202 | Losses: 3363
+Win Rate: 55.55%
+Final Bankroll: $93900.00 (Start $10000)
+ROI: 11.09%
+----------------------------------------
+
+--- Volatility & Bias Analysis ---
+Avg Spread (P90-P10) [PTS]: 17.54
+Avg Implied Std [PTS]: 6.85
+Actual Std [PTS]: 9.76
+Capture Ratio: 0.70
+----------------------------------------
+PTS | Our MAE: 5.50 (Bias: 0.57 Underest) | House MAE: 5.52 (Bias: 0.15 Underest)
+AST | Our MAE: 1.67 (Bias: 0.20 Underest) | House MAE: 1.68 (Bias: 0.11 Underest)
+REB | Our MAE: 2.07 (Bias: 0.19 Underest) | House MAE: 2.08 (Bias: 0.03 Underest)

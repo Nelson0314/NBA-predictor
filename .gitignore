@@ -11,3 +11,5 @@ predictions_*.csv
 event_odds_data.json
 *.npy
 test
+evaluation_report_*.txt
+report_*.txt
