@@ -67,7 +67,7 @@ python scripts/update_live_2025.py
 **Step B: Generate Predictions**
 Predict stats for upcoming games and compare with market odds.
 ```bash
-python scripts/predict_bets.py
+python scripts/auto_bet.py
 ```
 *Note: This requires an `event_odds_data.json` file containing current market lines.*
 
